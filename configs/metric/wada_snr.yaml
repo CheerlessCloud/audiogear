@@ -1,0 +1,2 @@
+# Blind SNR (WADA, DSP, no model). Column: wada_snr
+_target_: audiogear.pipeline.metrics.wada_snr.SnrMetric

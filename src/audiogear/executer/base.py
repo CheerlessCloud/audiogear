@@ -1,0 +1,165 @@
+import dataclasses
+import json
+from abc import ABC, abstractmethod
+from collections import deque
+from collections.abc import Sequence
+from typing import Callable
+
+from loguru import logger
+
+from audiogear.io import DataFolderLike, get_datafolder
+from audiogear.pipeline.base import PipelineStep
+from audiogear.utils.logging import add_task_logger, close_task_logger, get_random_str, get_timestamp, log_pipeline
+
+
+class PipelineExecutor(ABC):
+    @abstractmethod
+    def __init__(
+        self,
+        pipeline: list[PipelineStep | Callable],
+        logging_dir: DataFolderLike = None,
+        skip_completed: bool = True,
+    ):
+        """
+        Args:
+            pipeline: a list of PipelineStep and/or custom functions
+                with arguments (data: DocumentsPipeline, rank: int, world_size: int)
+            logging_dir: where to save logs, stats, etc. Should be parsable into a datatrove.io.DataFolder
+            skip_completed: whether to skip tasks that were completed in
+                previous runs. default: True
+        """
+        self.pipeline: list[PipelineStep | Callable] = pipeline
+        self.logging_dir = get_datafolder(logging_dir if logging_dir else f"logs/{get_timestamp()}_{get_random_str()}")
+        self.skip_completed = skip_completed
+
+    @abstractmethod
+    def run(self):
+        """
+            This method is responsible for correctly invoking `self._run_for_rank` for each task that is to be run.
+            See slurm and local executor for example usage.
+        Returns:
+
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def world_size(self) -> int:
+        """
+        Returns: the total number of tasks to consider. This is used for sharding data files, for example
+
+        """
+        return 0
+
+    def _run_for_rank(self, rank: int, local_rank: int = 0) -> None:
+        """
+            Main executor's method. Sets up logging, pipes data from each pipeline step to the next, saves statistics
+            and marks tasks as completed.
+        Args:
+            rank: the rank that we want to run the pipeline for
+            local_rank: at the moment this is only used for logging.
+            Any task with local_rank != 0 will not print logs to console.
+
+        Returns: the stats for this task
+
+        """
+        if self.is_rank_completed(rank):
+            logger.info(f"Skipping {rank=} as it has already been completed.")
+        logfile = add_task_logger(self.logging_dir, rank, local_rank)
+        log_pipeline(self.pipeline)
+        try:
+            # pipe data from one step to the next
+            pipelined_data = None
+            for pipeline_step in self.pipeline:
+                if callable(pipeline_step):
+                    pipelined_data = pipeline_step(pipelined_data, rank, self.world_size)
+                elif isinstance(pipeline_step, Sequence) and not isinstance(pipeline_step, str):
+                    pipelined_data = pipeline_step
+                else:
+                    raise ValueError
+            if pipelined_data:
+                deque(pipelined_data, maxlen=0)
+
+            logger.success(f"Processing done for {rank=}")
+
+            # completed
+            self.mark_rank_as_completed(rank)
+        except Exception as e:
+            logger.exception(e)
+            raise e
+        finally:
+            close_task_logger(logfile)
+
+    def is_rank_completed(self, rank: int) -> bool:
+        """
+            Checks if a given task has already been completed.
+        Args:
+            rank: the rank of the task to check
+
+        Returns: whether task is already completed. If `skip_completed=False`, will always return `False`.
+
+        """
+        return self.skip_completed and self.logging_dir.isfile(f"completions/{rank:05d}")
+
+    def mark_rank_as_completed(self, rank: int):
+        """
+            Marks a given task as completed.
+            In practice this involves creating an empty file with the rank in the filename.
+        Args:
+            rank: the rank of the task to mark as completed
+
+        Returns:
+
+        """
+        self.logging_dir.open(f"completions/{rank:05d}", "w").close()
+
+    def get_incomplete_ranks(self) -> list[int]:
+        """
+            Gets a full list of ranks that are still incomplete.
+            Usually faster than calling `is_rank_completed` for each task.
+        Returns: list of ranks that are incomplete
+
+        """
+        completed = set(self.logging_dir.list_files("completions"))
+        return list(
+            filter(
+                lambda rank: not self.skip_completed or f"completions/{rank:05d}" not in completed,
+                range(self.world_size),
+            )
+        )
+
+    def to_json(self, indent=4) -> str:
+        """
+            Returns a json representation of this executor.
+        Args:
+            indent: how many spaces to use per indent
+
+        Returns: json string
+
+        """
+        data = self.__dict__
+        data["pipeline"] = [{a: b for a, b in x.__dict__.items() if a != "stats"} for x in data["pipeline"]]
+        return json.dumps(data, indent=indent)
+
+    def save_executor_as_json(self, indent: int = 4):
+        """
+            Save a json representation of this executor to a filesystem.
+        Args:
+            indent: how many spaces to use per indent
+
+        Returns:
+
+        """
+        with self.logging_dir.open("executor.json", "w") as f:
+            json.dump(self, f, cls=ExecutorJSONEncoder, indent=indent)
+
+
+class ExecutorJSONEncoder(json.JSONEncoder):
+    def default(self, o):
+        if dataclasses.is_dataclass(o):
+            return dataclasses.asdict(o)
+        if isinstance(o, PipelineExecutor):
+            return o.__dict__ | {"world_size": o.world_size}
+        if isinstance(o, PipelineStep):
+            return {a: b for a, b in o.__dict__.items() if a != "stats"}
+        return str(o)

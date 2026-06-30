@@ -1,0 +1,23 @@
+# Base config. A per-dataset config (e.g. configs/resd.yaml) is normally selected
+# with `python process.py --config-name resd`. This default just wires the
+# groups together with an empty metric list.
+defaults:
+  - reader: csv
+  - writer: csv
+  - executor: local
+  - _self_
+
+# Keep the working directory where process.py was launched.
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null   # don't litter the cwd with a .hydra/ dir
+
+# Global device shared by all model blocks (override: device=cpu / device=cuda:1).
+device: cuda
+
+# Ordered list of metric / transcriber / labeler blocks to run between the
+# reader and the writer. A dataset config fills this in.
+metrics: []

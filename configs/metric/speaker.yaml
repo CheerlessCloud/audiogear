@@ -1,0 +1,6 @@
+# Speaker labeling via embed + clustering with confidence thresholds (run executor.tasks=1).
+# Columns: speaker, speaker_conf, speaker_margin
+_target_: audiogear.pipeline.metrics.speaker.SpeakerLabeler
+device: ${device}
+assign_threshold: 0.75
+margin: 0.10

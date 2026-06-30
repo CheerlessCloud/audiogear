@@ -1,0 +1,3 @@
+# Speaker gender (wav2vec2 xlsr). Column: gender
+_target_: audiogear.pipeline.metrics.gender.GenderMetric
+device: ${device}

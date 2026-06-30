@@ -1,0 +1,4 @@
+# Effective bandwidth via spectral roll-off (DSP). Columns: bandwidth_hz, is_upsampled_est
+_target_: audiogear.pipeline.metrics.bandwidth.BandwidthMetric
+thresh_db: -50.0
+upsample_ratio: 0.92

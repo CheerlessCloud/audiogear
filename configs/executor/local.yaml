@@ -1,0 +1,17 @@
+_target_: audiogear.executer.local.LocalPipelineExecutor
+# tasks  = number of shards the dataset is split into (the world size)
+# workers = how many shards run concurrently. With GPU pinning, each worker
+#           pins one GPU, so set workers to the number of GPUs to use.
+#   1 machine / 1 GPU      -> tasks=N workers=1
+#   1 machine / many GPUs  -> tasks=N workers=<n_gpus>
+tasks: 1
+workers: 1
+# GPUs to round-robin worker pinning over. null => auto-detect (cuda count);
+# 0 => CPU only.
+gpus: null
+# Multi-node: this node runs ranks [local_rank_offset, +local_tasks). -1 => all.
+# Usually set automatically from SLURM_*/torchrun env (see build.py).
+local_tasks: -1
+local_rank_offset: 0
+skip_completed: true
+logging_dir: logs

@@ -1,0 +1,3 @@
+# No-reference MOS (DistillMOS). Columns: distillmos
+_target_: audiogear.pipeline.metrics.distillmos.DistillMosMetric
+device: ${device}

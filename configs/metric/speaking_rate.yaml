@@ -1,0 +1,3 @@
+# Phonemes/sec via espeak-ng phonemizer. Columns: speaking_rate, phonemes_per_word, char_rate
+_target_: audiogear.pipeline.metrics.speaking_rate.SpeakingRateMetric
+language: ru

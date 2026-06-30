@@ -1,0 +1,4 @@
+# SNR + C50 reverb (Brouhaha / pyannote; needs `brouhaha` extra + HF_TOKEN). Columns: snr, c50
+_target_: audiogear.pipeline.metrics.brouhaha_snr_reverb.SnrReverbMetrics
+device: ${device}
+model_path: pyannote/brouhaha

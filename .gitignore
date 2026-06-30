@@ -1,0 +1,61 @@
+# secrets
+.env
+
+# model weights (downloaded / large)
+models/*.pth
+models/*.pt
+models/*.tar
+models/*.ckpt
+models/*.bin
+models/*.safetensors
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# uv
+uv.lock
+
+# pipeline outputs / logs / caches
+logs/
+outputs/
+multirun/
+.hydra/
+*.log
+.cache/
+~/.cache/huggingface/
+
+# data (don't commit audio)
+*.wav
+*.flac
+*.mp3
+*.ogg
+data/
+!resd/  # external test set lives outside the repo anyway
+
+# notebooks scratch
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# OS
+.DS_Store
+
+# personal working notes (not for publication)
+
+
+# personal run artifacts (generalized templates live in examples/)
+*.out
+/run_features.py
+/gen_feat_configs.py
+/build_betterset.py
+/filter_clean.py
+# auto-generated per-dataset configs (hardcoded local paths); regenerate locally
+/configs/feat_*.yaml

@@ -1,0 +1,77 @@
+# @package _global_
+# Transcribe UNANNOTATED audio (datasets with empty `text`, e.g.
+# rootreck_fallout4) using multi-ASR consensus, and write the chosen transcript
+# back into `text`. Run:
+#
+#   uv run python process.py --config-name annotate \
+#       reader.data_folder=/path/to/your/dataset
+#
+#   # dry run on 10 clips:
+#   uv run python process.py --config-name annotate reader.limit=10
+#
+# Consensus runs N ASR backends and keeps the medoid hypothesis (lowest mean
+# pairwise CER) — robust to any single model failing. Comment out backends you
+# haven't installed (T-one needs a git install; Voxtral is a ~9 GB download).
+defaults:
+  - reader: ru
+  - writer: csv
+  - executor: local
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+device: cuda
+
+reader:
+  # Point AUDIOGEAR_DATA_DIR at the dataset, or override reader.data_folder=...
+  data_folder: ${oc.env:AUDIOGEAR_DATA_DIR,data/your_dataset}
+  limit: -1
+
+writer:
+  output_folder: outputs
+  output_filename: ${oc.env:AUDIOGEAR_OUT,annotated}_$rank.csv
+  sep: "|"
+
+metrics:
+  - _target_: audiogear.pipeline.transcribers.consensus.ConsensusTranscriber
+    only_missing: true        # skip clips that already have text
+    overwrite_text: true      # write the chosen transcript into `text`
+    min_agreement: 0.5        # flag clips the models disagree on (asr_low_confidence)
+    backends:
+      # Active by default — both install cleanly with the `asr` extra and top
+      # the open Russian ASR leaderboards.
+      - _target_: audiogear.pipeline.transcribers.backends.GigaAMBackend
+        model_name: v2_rnnt    # pip gigaam ships up to v2; v3 = manual (see backend docstring)
+        device: ${device}
+      - _target_: audiogear.pipeline.transcribers.backends.WhisperBackend
+        model_name: large-v3
+        language: ru
+        device: ${device}
+      # T-one (t-tech) — third backend for a more robust 3-model consensus.
+      # Install once: uv sync --extra tone   (or: uv pip install
+      #   "tone @ git+https://github.com/voicekit-team/T-one.git")
+      # If not installed it raises on load; consensus catches that, drops this
+      # hypothesis, and carries on — remove this entry to silence the warning.
+      - _target_: audiogear.pipeline.transcribers.backends.ToneBackend
+        device: ${device}
+      # Tip: GigaAM-v3 e2e (e2e_rnnt) outputs punctuated text directly — set a
+      # GigaAMBackend model_name to a v3 e2e variant once v3 is installed, and
+      # `text` will already carry audio-derived punctuation.
+
+  # Punctuation as a SEPARATE feature column (`text_punctuated`), independent of
+  # `text`. method=silero (text-based restore) or method=asr (audio-based via a
+  # punctuating ASR — closest to "by audio").
+  - _target_: audiogear.pipeline.metrics.punctuation.PunctuationMetric
+    method: silero            # or: asr  (re-transcribes audio with Whisper)
+    column: text_punctuated
+    language: ru
+    device: ${device}
+
+  # optionally also score quality while we're here:
+  # - _target_: audiogear.pipeline.metrics.distillmos.DistillMosMetric
+  #   device: ${device}

@@ -1,0 +1,62 @@
+# Per-dataset config for RESD (Russian Emotional Speech Dialogs).
+# Run:  uv run python process.py --config-name resd
+#       uv run python process.py --config-name resd reader.limit=10        # dry run
+#       uv run python process.py --config-name resd executor.tasks=16 executor.workers=2
+#
+# This file DECLARES which metrics to compute; each entry is resolved via
+# hydra.utils.instantiate (its `_target_` is the block class). Add/remove lines
+# to change the feature set. Individual block configs also live in configs/metric/.
+defaults:
+  - reader: csv
+  - writer: csv
+  - executor: local
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+device: cuda
+
+reader:
+  # Point AUDIOGEAR_DATA_DIR at the dataset, or override reader.data_folder=...
+  data_folder: ${oc.env:AUDIOGEAR_DATA_DIR,data/resd}
+  glob_pattern: resd_metadata.csv
+  delimiter: "|"
+  audio_key: audio_path
+  limit: -1
+
+writer:
+  # $rank (no braces, so OmegaConf leaves it; the writer's string.Template fills
+  # it) => one CSV per shard (multi-GPU/multi-node safe); merge afterwards.
+  output_folder: outputs
+  output_filename: resd_annotated_$rank.csv
+  sep: "|"
+
+# --- metrics to compute (ylacombe-core + RU MOS/WER + gender) ---
+metrics:
+  - _target_: audiogear.pipeline.metrics.distillmos.DistillMosMetric
+    device: ${device}
+  - _target_: audiogear.pipeline.metrics.squim.SquimMetrics
+    device: ${device}
+  - _target_: audiogear.pipeline.metrics.pitch.PitchMetric
+    backend: pyin
+  - _target_: audiogear.pipeline.metrics.speaking_rate.SpeakingRateMetric
+    language: ru
+  - _target_: audiogear.pipeline.metrics.wer.WhisperWer
+    whisper_model: large-v3
+    language: ru
+    device: ${device}
+  - _target_: audiogear.pipeline.metrics.gender.GenderMetric
+    device: ${device}
+  - _target_: audiogear.pipeline.metrics.style.StyleMetric
+  # Heavier / optional blocks — uncomment to enable:
+  # - _target_: audiogear.pipeline.metrics.brouhaha_snr_reverb.SnrReverbMetrics
+  #   device: ${device}
+  # - _target_: audiogear.pipeline.metrics.emotion.EmotionMetric        # RU DUSHA
+  #   device: ${device}
+  # - _target_: audiogear.pipeline.metrics.speaker.SpeakerLabeler        # run with executor.tasks=1
+  #   device: ${device}

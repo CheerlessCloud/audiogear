@@ -1,0 +1,3 @@
+# Pitch mean/std. backend: pyin (librosa, default) or penn (needs `pitch` extra)
+_target_: audiogear.pipeline.metrics.pitch.PitchMetric
+backend: pyin

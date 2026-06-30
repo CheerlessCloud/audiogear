@@ -1,0 +1,3 @@
+# torchaudio SQUIM. Columns: pyt_stoi, pyt_pesq, pyt_si_sdr
+_target_: audiogear.pipeline.metrics.squim.SquimMetrics
+device: ${device}

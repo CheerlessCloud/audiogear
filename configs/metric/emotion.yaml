@@ -1,0 +1,3 @@
+# Speech emotion (default RU DUSHA HuBERT). Columns: emotion, emotion_score
+_target_: audiogear.pipeline.metrics.emotion.EmotionMetric
+device: ${device}

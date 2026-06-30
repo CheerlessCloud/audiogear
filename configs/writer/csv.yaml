@@ -1,0 +1,4 @@
+_target_: audiogear.pipeline.writers.csv.CsvWriter
+output_folder: outputs
+output_filename: metadata_annotated.csv
+sep: "|"

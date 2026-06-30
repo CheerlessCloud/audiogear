@@ -1,0 +1,5 @@
+# WER/CER of transcript vs reference text (faster-whisper). Columns: whisper_wer, whisper_cer
+_target_: audiogear.pipeline.metrics.wer.WhisperWer
+whisper_model: large-v3
+language: ru
+device: ${device}

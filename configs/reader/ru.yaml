@@ -1,0 +1,11 @@
+# Reader preset for the unified Russian dataset schema
+# (<root>/<dataset>/metadata.csv + audio/). See README "Dataset structure".
+# audio_path is relative to the dataset dir; id is "<dataset>/<rel>".
+_target_: audiogear.pipeline.readers.csv.CsvReader
+data_folder: ???              # the dataset dir, e.g. /path/to/data/rootreck_fallout4
+glob_pattern: metadata.csv
+delimiter: "|"
+audio_key: audio_path
+id_key: id
+limit: -1
+recursive: false

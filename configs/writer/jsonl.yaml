@@ -1,0 +1,3 @@
+_target_: audiogear.pipeline.writers.jsonl.JsonlWriter
+output_folder: outputs
+output_filename: metadata_annotated.jsonl

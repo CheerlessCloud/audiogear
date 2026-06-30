@@ -1,0 +1,2 @@
+# Model-free prosody. Columns: energy_db, energy_dynamics, expressiveness
+_target_: audiogear.pipeline.metrics.style.StyleMetric
