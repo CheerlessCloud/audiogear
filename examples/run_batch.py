@@ -52,16 +52,29 @@ def merge_shards(ds: str) -> int:
         return 0
     out = os.path.join(DATA_ROOT, ds, "extended_metadata.csv")
     n = 0
+    # Rows are assigned to shards by row_index % tasks, so changing
+    # executor.tasks between an interrupted run and its rerun re-partitions the
+    # rows and old/new shard files overlap — drop duplicate ids (first wins).
+    seen: set[str] = set()
+    dups = 0
     with open(out, "w", encoding="utf-8", newline="") as fo:
         writer = None
         for sh in shards:
             with open(sh, encoding="utf-8") as fi:
                 for row in csv.DictReader(fi, delimiter="|"):
+                    rid = row.get("id")
+                    if rid:
+                        if rid in seen:
+                            dups += 1
+                            continue
+                        seen.add(rid)
                     if writer is None:
                         writer = csv.DictWriter(fo, fieldnames=list(row.keys()), delimiter="|", extrasaction="ignore")
                         writer.writeheader()
                     writer.writerow(row)
                     n += 1
+    if dups:
+        print(f"[warn] {ds}: dropped {dups} duplicate id(s) while merging shards", flush=True)
     return n
 
 
