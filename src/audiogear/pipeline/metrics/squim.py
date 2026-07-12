@@ -45,9 +45,20 @@ class SquimMetrics(PrefetchGPUMetric):
 
         return cached_model(("SquimMetrics", device), build)
 
+    def _failed_value(self):
+        # -1 = "clip could not be scored" (too short, corrupt, model failure —
+        # the base per-clip guard routes unexpected errors here). Matches the
+        # convention in already-computed datasets.
+        return -1.0, -1.0, -1.0
+
     def _run(self, audio, device: str):
         import torch
 
+        # SQUIM's conv stack needs a minimum input length; ultra-short/empty clips
+        # (~2 ms) crash it ("kernel size can't be greater than actual input size").
+        # Cheap semantic pre-check — such clips are unscorable, not an error.
+        if audio.shape[-1] < 1024:
+            return self._failed_value()
         audio = audio.to(device)
         with torch.no_grad():
             stoi, pesq, si_sdr = self._model_on(device)(audio)

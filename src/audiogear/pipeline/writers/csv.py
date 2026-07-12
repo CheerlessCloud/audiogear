@@ -21,9 +21,16 @@ class CsvWriter(DiskWriter):
         compression: str | None = None,
         adapter: Callable = None,
         sep: str = "|",
+        ensure_columns: list[str] | None = None,
     ):
         super().__init__(output_folder, output_filename=output_filename, compression=compression, adapter=adapter)
         self.sep = sep
+        # Columns that must be in the header even if the first row lacks them.
+        # The schema is locked from the first row (below), so without this a
+        # metric column absent from that one row (skipped clip, lane ordering)
+        # would be dropped for the whole file. ``build_pipeline`` fills it from
+        # the metrics' declared ``output_columns``.
+        self.ensure_columns: list[str] = list(ensure_columns or [])
         # The column layout is locked from the FIRST row written and reused for
         # every subsequent row and every output file. CSV is a positional format:
         # if rows carried different field sets (e.g. one clip missing `bit_rate`),
@@ -58,7 +65,7 @@ class CsvWriter(DiskWriter):
         flat_data.pop("metadata", None)
 
         if self.fieldnames is None:
-            self.fieldnames = list(flat_data.keys())
+            self.fieldnames = list(flat_data.keys()) + [c for c in self.ensure_columns if c not in flat_data]
         unexpected = [k for k in flat_data if k not in self.fieldnames]
         if unexpected:
             # A later row introduced columns the locked header does not have.

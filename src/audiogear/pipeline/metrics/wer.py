@@ -63,6 +63,13 @@ class WhisperWer(BaseMetric):
         segments, _ = self._model_on(device).transcribe(audio_file, language=self.language)
         return "".join(s.text for s in segments)
 
+    def _failed_value(self):
+        # -1 marks both "no reference text" and "clip could not be scored"
+        # (corrupt audio etc. — the base per-clip guard routes those here).
+        # Matches the convention already baked into computed datasets, where
+        # filters treat any negative value as "skip".
+        return -1.0, -1.0
+
     def _score(self, segment: AudioSegment, device: str):
         import jiwer
 

@@ -77,6 +77,17 @@ class ParallelLanes(PipelineStep):
         )
         return f"{self.type}: [{inner}]"
 
+    @property
+    def output_columns(self) -> tuple[str, ...]:
+        """Union of the metadata columns declared by the lane steps (see
+        ``BaseMetric.output_columns``) — lets the pipeline builder pre-declare
+        the writer schema across all lanes."""
+        cols: list[str] = []
+        for lane in self.lanes:
+            for step in lane:
+                cols.extend(getattr(step, "output_columns", ()) or ())
+        return tuple(cols)
+
     def _run_lane(self, lane, data, rank, world_size):
         for step in lane:
             data = step(data, rank, world_size)
@@ -90,8 +101,22 @@ class ParallelLanes(PipelineStep):
         logger.info(
             f"Running {len(self.lanes)} lanes concurrently over {len(data)} segments: {self.lane_names}"
         )
+        # Join ALL lanes before raising: with a bare f.result() the first error
+        # would surface while sibling lanes keep running to completion behind a
+        # dying shard, and their own errors would be silently lost.
+        errors: list[tuple[str, Exception]] = []
         with ThreadPoolExecutor(max_workers=len(self.lanes)) as ex:
-            futures = [ex.submit(self._run_lane, lane, data, rank, world_size) for lane in self.lanes]
-            for f in futures:
-                f.result()  # join all lanes; re-raise the first lane error
+            futures = [
+                (nm, ex.submit(self._run_lane, lane, data, rank, world_size))
+                for nm, lane in zip(self.lane_names, self.lanes)
+            ]
+            for nm, f in futures:
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.exception(f"Lane '{nm}' failed: {e}")
+                    errors.append((nm, e))
+        if errors:
+            failed = ", ".join(nm for nm, _ in errors)
+            raise RuntimeError(f"{len(errors)} lane(s) failed: {failed}") from errors[0][1]
         return data

@@ -24,7 +24,14 @@ def build_pipeline(cfg: DictConfig) -> list[PipelineStep]:
     steps: list[PipelineStep] = [instantiate(cfg.reader)]
     for metric_cfg in cfg.get("metrics", []) or []:
         steps.append(instantiate(metric_cfg))
-    steps.append(instantiate(cfg.writer))
+    writer = instantiate(cfg.writer)
+    # Pre-declare the metric columns to the writer: its CSV schema is locked
+    # from the first row, so a column the first clip happens to miss (skipped
+    # clip, lane ordering) would otherwise silently drop for the whole shard.
+    declared = [col for step in steps for col in (getattr(step, "output_columns", ()) or ())]
+    if declared and hasattr(writer, "ensure_columns") and not writer.ensure_columns:
+        writer.ensure_columns = list(dict.fromkeys(declared))
+    steps.append(writer)
     return steps
 
 

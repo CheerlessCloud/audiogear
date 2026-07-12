@@ -60,6 +60,7 @@ class BaseMetric(PipelineStep, ABC):
         cpu_overflow_threads: int = 1,
         batch_size: int = 16,
         max_batch_seconds: float = 480.0,
+        max_consecutive_failures: int = 50,
     ):
         """
         the file writer helps save progress to disk while you compute metrics.
@@ -79,6 +80,11 @@ class BaseMetric(PipelineStep, ABC):
             ``batch_size * max_padded_clip_seconds``. Activation memory scales
             roughly with this product, so it is the knob to turn down on OOM (the
             binary-backoff ladder also auto-recovers, so it can be aggressive).
+        max_consecutive_failures: abort the shard when this many clips fail in an
+            unbroken row. Isolated failures (corrupt files) become sentinel rows,
+            but an unbroken streak means the failure is systematic (model load,
+            bad config, dead CUDA context) and sentinels would silently produce a
+            garbage run.
         """
         self.metric = metric
         self.file_writer = file_writer
@@ -88,6 +94,16 @@ class BaseMetric(PipelineStep, ABC):
         self.cpu_overflow_threads = cpu_overflow_threads
         self.batch_size = batch_size
         self.max_batch_seconds = max_batch_seconds
+        self.max_consecutive_failures = max_consecutive_failures
+        self._failures = 0
+        self._consecutive_failures = 0
+
+    @property
+    def output_columns(self) -> tuple[str, ...]:
+        """Metadata columns this metric writes — lets the pipeline builder
+        pre-declare the writer schema so a column is never dropped just because
+        the first row happened to miss it."""
+        return self.metric if isinstance(self.metric, tuple) else (self.metric,)
 
     @abstractmethod
     def compute_metric(self, segment: AudioSegment) -> int | float | bool:
@@ -154,36 +170,78 @@ class BaseMetric(PipelineStep, ABC):
         if self.file_writer:
             self.file_writer.write(segment)
 
+    # --- per-clip failure guard -------------------------------------------------
+    # One corrupt/empty clip must never kill a shard (a single bad mp3 used to
+    # take down a 549k-clip run). Every execution path routes per-clip exceptions
+    # here: the clip gets a sentinel row and the run continues. Only an unbroken
+    # failure streak (systematic breakage, not bad data) aborts the shard.
+    # The counters are heuristic — parallel_cpu threads may race on them, which
+    # only makes the abort threshold approximate.
+    def _record_failure(self, segment: AudioSegment, exc: BaseException):
+        """Log one clip's failure and return the sentinel value to write."""
+        self._failures += 1
+        self._consecutive_failures += 1
+        logger.warning(
+            f"{self.metric} failed on id={segment.id} ({segment.audio_file}): "
+            f"{type(exc).__name__}: {exc} — writing sentinel"
+        )
+        if self._consecutive_failures >= self.max_consecutive_failures:
+            raise RuntimeError(
+                f"{self.metric}: {self._consecutive_failures} clips failed in an unbroken "
+                f"row — aborting the shard (this is systematic, not bad data)"
+            ) from exc
+        return self._failed_value()
+
+    def _record_success(self):
+        self._consecutive_failures = 0
+
+    def _guarded_compute(self, segment: AudioSegment):
+        """``compute_metric`` wrapped in the per-clip guard (CPU paths; the GPU
+        paths get the same guard inside ``_gpu_compute`` / ``_process_batch`` /
+        the prefetch loop)."""
+        try:
+            res = self.compute_metric(segment)
+        except Exception as e:
+            return self._record_failure(segment, e)
+        self._record_success()
+        return res
+
     # --- GPU path: per-clip OOM ladder ----------------------------------------
     def _gpu_compute(self, segment: AudioSegment):
-        """Run one clip on the GPU with OOM recovery.
+        """Run one clip on the GPU with OOM recovery and the per-clip guard.
 
         Returns ``(value, deferred)``. When the full-size and chunked-GPU
         attempts both OOM, returns ``(None, True)`` so run() can batch the clip
-        into the CPU-overflow bucket instead of stalling the GPU on it.
+        into the CPU-overflow bucket instead of stalling the GPU on it. A
+        non-OOM error (corrupt audio, model quirk on an odd input) becomes a
+        sentinel value instead of killing the shard.
         """
         try:
-            return self.compute_metric(segment), False
+            res = self.compute_metric(segment)
         except Exception as e:
             if not is_oom_error(e):
-                raise
+                return self._record_failure(segment, e), False
             free_cuda()
             logger.warning(
                 f"CUDA OOM on {self.metric} for id={segment.id} "
                 f"(duration={segment.duration}s) — retrying chunked on GPU"
             )
             try:
-                return self.compute_metric_recover(segment), False
+                res = self.compute_metric_recover(segment)
             except NotRecoverable:
-                pass
+                return None, True
             except Exception as e2:
-                if not is_oom_error(e2):
-                    raise
+                # OOM again or the windowed retry itself broke — either way the
+                # CPU drain is the last strategy that can still finish the clip
+                # (it guards everything and writes a sentinel at worst).
                 free_cuda()
                 logger.warning(
-                    f"Chunked GPU retry still OOM for id={segment.id} — deferring to CPU"
+                    f"Chunked GPU retry failed ({type(e2).__name__}) for id={segment.id} "
+                    f"— deferring to CPU"
                 )
-            return None, True
+                return None, True
+        self._record_success()
+        return res, False
 
     # --- GPU path: length-bucketed batched inference --------------------------
     def _segment_seconds(self, segment: AudioSegment) -> float:
@@ -248,15 +306,20 @@ class BaseMetric(PipelineStep, ABC):
                         res = self._infer(fut.result())  # single-thread GPU use
                         self._assign(seg, res)
                         self._write(seg)
+                        self._record_success()
                     except Exception as e:
-                        if not is_oom_error(e):
-                            raise
-                        free_cuda()
-                        r, deferred = self._gpu_compute(seg)  # re-decode + ladder
-                        if deferred:
-                            overflow.append(seg)
+                        if is_oom_error(e):
+                            free_cuda()
+                            r, deferred = self._gpu_compute(seg)  # re-decode + ladder
+                            if deferred:
+                                overflow.append(seg)
+                            else:
+                                self._assign(seg, r)
+                                self._write(seg)
                         else:
-                            self._assign(seg, r)
+                            # decode (fut.result) or inference broke on this one
+                            # clip — sentinel, keep the shard going
+                            self._assign(seg, self._record_failure(seg, e))
                             self._write(seg)
                     pbar.update(1)
                     if i < n:
@@ -270,18 +333,38 @@ class BaseMetric(PipelineStep, ABC):
 
         A size-1 batch that still OOMs drops into the per-clip ladder
         (chunked-GPU -> CPU-overflow), so batching and the long-clip recovery are
-        one continuous mechanism."""
+        one continuous mechanism. A non-OOM batch error (usually one corrupt clip
+        poisoning the whole forward) retries the batch clip-by-clip so only the
+        culprit gets a sentinel."""
         try:
             results = self.compute_batch(batch)
             for seg, res in zip(batch, results):
                 self._assign(seg, res)
                 self._write(seg)
+            self._record_success()
             pbar.update(len(batch))
             return
         except Exception as e:
-            if not is_oom_error(e):
-                raise
             free_cuda()
+            if not is_oom_error(e):
+                if len(batch) == 1:
+                    self._assign(batch[0], self._record_failure(batch[0], e))
+                    self._write(batch[0])
+                    pbar.update(1)
+                    return
+                logger.warning(
+                    f"{type(e).__name__} on batch of {len(batch)} for {self.metric} "
+                    f"— retrying per clip"
+                )
+                for seg in batch:
+                    res, deferred = self._gpu_compute(seg)
+                    if deferred:
+                        overflow.append(seg)
+                    else:
+                        self._assign(seg, res)
+                        self._write(seg)
+                    pbar.update(1)
+                return
         if len(batch) == 1:
             res, deferred = self._gpu_compute(batch[0])
             if deferred:
@@ -311,9 +394,11 @@ class BaseMetric(PipelineStep, ABC):
             try:
                 return self.compute_metric_cpu(seg)
             except NotRecoverable:
+                self._failures += 1
                 logger.error(f"No CPU fallback for {self.metric} id={seg.id}; writing sentinel")
                 return self._failed_value()
             except Exception as e:  # CPU should not OOM; log and keep going
+                self._failures += 1
                 logger.exception(f"CPU fallback failed for {self.metric} id={seg.id}: {e}")
                 return self._failed_value()
 
@@ -332,6 +417,8 @@ class BaseMetric(PipelineStep, ABC):
             data = [item for item in data if item.id not in self.ids_in_list2]
 
         logger.info(f"Computing {self.metric} for {len(data)} segments")
+        self._failures = 0
+        self._consecutive_failures = 0
 
         if self.gpu and self.supports_batch and self.batch_size > 1 and len(data) > 1:
             # Length-bucketed, VRAM-bounded batched GPU pass (the throughput win).
@@ -359,9 +446,14 @@ class BaseMetric(PipelineStep, ABC):
             self._run_parallel_cpu(data)
         else:
             for segment in tqdm(data):
-                self._assign(segment, self.compute_metric(segment))
+                self._assign(segment, self._guarded_compute(segment))
                 self._write(segment)
 
+        if self._failures:
+            logger.warning(
+                f"{self.metric}: {self._failures}/{len(data)} clip(s) failed and "
+                f"carry sentinel values"
+            )
         if self.file_reader:
             data = self.prev_data + data
         return data
@@ -373,7 +465,7 @@ class BaseMetric(PipelineStep, ABC):
             with tqdm(total=len(data)) as pbar:
                 for b in range(n_batches):
                     chunk = data[b * batch : (b + 1) * batch]
-                    for segment, res in zip(chunk, ex.map(self.compute_metric, chunk)):
+                    for segment, res in zip(chunk, ex.map(self._guarded_compute, chunk)):
                         self._assign(segment, res)
                         self._write(segment)
                         pbar.update(1)

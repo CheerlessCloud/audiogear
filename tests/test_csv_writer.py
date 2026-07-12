@@ -98,6 +98,35 @@ def test_metadata_is_flattened_into_columns(tmp_path):
     assert "metadata" not in rows[0]
 
 
+def test_ensure_columns_survive_a_first_row_that_lacks_them(tmp_path):
+    # The schema locks from the first row; a metric column missing there
+    # (skipped clip, conditional metric) must still make the header so later
+    # rows don't lose their values.
+    writer = CsvWriter(str(tmp_path), output_filename="out.csv", sep="|", ensure_columns=["late_metric"])
+    with writer:
+        writer.write(make_segment("a", metadata={"m": 1}), rank=0)
+        writer.write(make_segment("b", metadata={"m": 2, "late_metric": 0.7}), rank=0)
+    rows = _read_raw(tmp_path / "out.csv")
+    assert rows[0]["late_metric"] == ""
+    assert rows[1]["late_metric"] == "0.7"
+
+
+def test_build_pipeline_predeclares_metric_columns_to_the_writer(tmp_path):
+    from omegaconf import OmegaConf
+
+    from audiogear.build import build_pipeline
+
+    cfg = OmegaConf.create(
+        {
+            "reader": {"_target_": "audiogear.pipeline.readers.csv.CsvReader", "data_folder": str(tmp_path)},
+            "metrics": [{"_target_": "audiogear.pipeline.metrics.wada_snr.SnrMetric"}],
+            "writer": {"_target_": "audiogear.pipeline.writers.csv.CsvWriter", "output_folder": str(tmp_path)},
+        }
+    )
+    steps = build_pipeline(cfg)
+    assert steps[-1].ensure_columns == ["wada_snr"]
+
+
 def test_unexpected_late_column_is_dropped_not_shifted(tmp_path, caplog):
     # If a later row sprouts an extra key, it must be dropped (alignment kept),
     # not silently widen that row and corrupt the file.
