@@ -61,6 +61,7 @@ class BaseMetric(PipelineStep, ABC):
         batch_size: int = 16,
         max_batch_seconds: float = 480.0,
         max_consecutive_failures: int = 50,
+        checkpoint_folder=None,
     ):
         """
         the file writer helps save progress to disk while you compute metrics.
@@ -85,6 +86,11 @@ class BaseMetric(PipelineStep, ABC):
             but an unbroken streak means the failure is systematic (model load,
             bad config, dead CUDA context) and sentinels would silently produce a
             garbage run.
+        checkpoint_folder: folder (DataFolderLike) for intra-shard resume — every
+            finished clip is appended to a per-metric JSONL there, and on restart
+            already-computed clips are skipped (see ``pipeline/checkpoint.py``).
+            ``None`` disables. Normally injected by ``build_pipeline``, not set in
+            per-metric configs.
         """
         self.metric = metric
         self.file_writer = file_writer
@@ -95,6 +101,8 @@ class BaseMetric(PipelineStep, ABC):
         self.batch_size = batch_size
         self.max_batch_seconds = max_batch_seconds
         self.max_consecutive_failures = max_consecutive_failures
+        self.checkpoint_folder = checkpoint_folder
+        self._checkpoint = None
         self._failures = 0
         self._consecutive_failures = 0
 
@@ -167,6 +175,8 @@ class BaseMetric(PipelineStep, ABC):
             segment.metadata[self.metric] = results
 
     def _write(self, segment):
+        if self._checkpoint is not None:
+            self._checkpoint.append(segment.id, {c: segment.metadata.get(c) for c in self.output_columns})
         if self.file_writer:
             self.file_writer.write(segment)
 
@@ -411,47 +421,81 @@ class BaseMetric(PipelineStep, ABC):
             self._assign(seg, res)
             self._write(seg)
 
+    def _resume_from_checkpoint(self, data: AudioPipeline, rank: int) -> AudioPipeline:
+        """Open the shard's checkpoint, fill cached values into their segments
+        and return only the segments still left to compute."""
+        from audiogear.pipeline.checkpoint import MetricCheckpoint
+
+        slug = f"{type(self).__name__}.{self.output_columns[0]}"
+        self._checkpoint = MetricCheckpoint(self.checkpoint_folder, slug, rank)
+        cache = self._checkpoint.load()
+        if not cache:
+            return data
+        todo = []
+        for segment in data:
+            row = cache.get(str(segment.id))
+            if row is None:
+                todo.append(segment)
+            else:
+                segment.metadata.update(row)
+        logger.info(
+            f"{self.metric}: resumed {len(data) - len(todo)} clip(s) from checkpoint, "
+            f"{len(todo)} left to compute"
+        )
+        return todo
+
     def run(self, data: AudioPipeline, rank: int = 0, world_size: int = 1) -> AudioPipeline:
         if self.file_reader:
             self._load_data()
             data = [item for item in data if item.id not in self.ids_in_list2]
 
-        logger.info(f"Computing {self.metric} for {len(data)} segments")
         self._failures = 0
         self._consecutive_failures = 0
 
-        if self.gpu and self.supports_batch and self.batch_size > 1 and len(data) > 1:
-            # Length-bucketed, VRAM-bounded batched GPU pass (the throughput win).
-            self._run_gpu_batched(data)
-        elif self.gpu and self.prefetch and len(data) > 1:
-            # bs=1 GPU pass with parallel decode prefetch (single-thread inference).
-            self._run_gpu_prefetch(data)
-        elif self.gpu:
-            # GPU pass with per-clip OOM recovery; un-recoverable clips are
-            # batched and finished on CPU after the GPU pass.
-            overflow: list[AudioSegment] = []
-            for segment in tqdm(data):
-                res, deferred = self._gpu_compute(segment)
-                if deferred:
-                    overflow.append(segment)
-                    continue
-                self._assign(segment, res)
-                self._write(segment)
-            if overflow:
-                self._drain_overflow(overflow)
-        elif self.parallel_cpu and self.num_threads > 1 and len(data) > 1:
-            # Parallel CPU map. Submit in bounded batches (instead of one giant
-            # ex.map over millions of clips) so memory/progress stay sane and
-            # results are written incrementally.
-            self._run_parallel_cpu(data)
-        else:
-            for segment in tqdm(data):
-                self._assign(segment, self._guarded_compute(segment))
-                self._write(segment)
+        # ``todo`` is what still needs computing this run; ``data`` (returned as
+        # is) keeps every segment, including ones restored from the checkpoint.
+        todo = data
+        if self.checkpoint_folder:
+            todo = self._resume_from_checkpoint(data, rank)
+
+        logger.info(f"Computing {self.metric} for {len(todo)} segments")
+        try:
+            if self.gpu and self.supports_batch and self.batch_size > 1 and len(todo) > 1:
+                # Length-bucketed, VRAM-bounded batched GPU pass (the throughput win).
+                self._run_gpu_batched(todo)
+            elif self.gpu and self.prefetch and len(todo) > 1:
+                # bs=1 GPU pass with parallel decode prefetch (single-thread inference).
+                self._run_gpu_prefetch(todo)
+            elif self.gpu:
+                # GPU pass with per-clip OOM recovery; un-recoverable clips are
+                # batched and finished on CPU after the GPU pass.
+                overflow: list[AudioSegment] = []
+                for segment in tqdm(todo):
+                    res, deferred = self._gpu_compute(segment)
+                    if deferred:
+                        overflow.append(segment)
+                        continue
+                    self._assign(segment, res)
+                    self._write(segment)
+                if overflow:
+                    self._drain_overflow(overflow)
+            elif self.parallel_cpu and self.num_threads > 1 and len(todo) > 1:
+                # Parallel CPU map. Submit in bounded batches (instead of one giant
+                # ex.map over millions of clips) so memory/progress stay sane and
+                # results are written incrementally.
+                self._run_parallel_cpu(todo)
+            else:
+                for segment in tqdm(todo):
+                    self._assign(segment, self._guarded_compute(segment))
+                    self._write(segment)
+        finally:
+            if self._checkpoint is not None:
+                self._checkpoint.close()
+                self._checkpoint = None
 
         if self._failures:
             logger.warning(
-                f"{self.metric}: {self._failures}/{len(data)} clip(s) failed and "
+                f"{self.metric}: {self._failures}/{len(todo)} clip(s) failed and "
                 f"carry sentinel values"
             )
         if self.file_reader:

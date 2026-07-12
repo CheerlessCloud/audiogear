@@ -17,6 +17,18 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from audiogear.pipeline.base import PipelineStep
+from audiogear.pipeline.metrics.base import BaseMetric
+
+
+def _metric_steps(steps):
+    """Yield every BaseMetric in the pipeline, descending into lanes."""
+    for step in steps:
+        if isinstance(step, BaseMetric):
+            yield step
+        for lane in getattr(step, "lanes", None) or []:
+            for sub in lane:
+                if isinstance(sub, BaseMetric):
+                    yield sub
 
 
 def build_pipeline(cfg: DictConfig) -> list[PipelineStep]:
@@ -31,6 +43,19 @@ def build_pipeline(cfg: DictConfig) -> list[PipelineStep]:
     declared = [col for step in steps for col in (getattr(step, "output_columns", ()) or ())]
     if declared and hasattr(writer, "ensure_columns") and not writer.ensure_columns:
         writer.ensure_columns = list(dict.fromkeys(declared))
+    # Intra-shard resume (on unless ``resume: false``): attach per-metric JSONL
+    # checkpoints so a crashed shard restarts where it stopped instead of
+    # recomputing hours of GPU work. Default location is next to the writer's
+    # output (``checkpoint_dir`` overrides). Delete that folder to force a
+    # recompute after changing metric parameters.
+    if cfg.get("resume", True):
+        checkpoint_dir = cfg.get("checkpoint_dir")
+        if not checkpoint_dir and getattr(writer, "output_folder", None) is not None:
+            checkpoint_dir = os.path.join(str(writer.output_folder.path), "checkpoints")
+        if checkpoint_dir:
+            for metric_step in _metric_steps(steps):
+                if metric_step.checkpoint_folder is None:
+                    metric_step.checkpoint_folder = checkpoint_dir
     steps.append(writer)
     return steps
 
