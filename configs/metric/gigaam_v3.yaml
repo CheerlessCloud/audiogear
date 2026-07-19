@@ -1,8 +1,14 @@
 # GigaAM-v3 e2e ASR (SberDevices, MIT): punctuated+normalized Russian transcript
-# grounded in the audio + CER vs reference text. Columns: gigaam3_text, gigaam3_cer.
-# Use gigaam3_text to transfer punctuation onto a clean reference transcript;
-# use gigaam3_cer (like whisper_cer / asr_agreement) to filter misaligned clips.
+# grounded in the audio + CER vs reference text + punctuation transfer.
+# Columns: gigaam3_text, gigaam3_cer, text_punctuated.
+# - gigaam3_text: raw punctuated hypothesis (what the model heard);
+# - gigaam3_cer: agreement vs `text` (like whisper_cer) to filter misaligned clips;
+# - text_punctuated: `text` WORDS with the hypothesis punctuation transferred on
+#   (difflib word alignment, trailing marks copied; empty when < min_match words
+#   align or the segment has no reference text). Set punct_column: null to skip.
 _target_: audiogear.pipeline.metrics.gigaam_v3.GigaAMv3
 model_name: v3_e2e_rnnt
 device: ${device}
 batch_size: 16
+punct_column: text_punctuated
+min_match: 0.6

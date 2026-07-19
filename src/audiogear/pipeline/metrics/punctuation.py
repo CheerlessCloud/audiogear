@@ -1,5 +1,70 @@
+import difflib
+import re
+
 from audiogear.data import AudioSegment
 from audiogear.pipeline.metrics.base import BaseMetric
+
+# --- punctuation transfer (reference words + ASR punctuation) -----------------
+# The words of a human-labelled transcript are the truth (they drive
+# phonemization); a punctuating ASR (GigaAM-v3 e2e) is the truth for pauses and
+# question intonation it HEARS in the audio. transfer_punctuation() combines
+# them: difflib word alignment on normalized forms, trailing marks copied from
+# the hypothesis onto the reference words. Battle-tested on the VoXtream-RU
+# fine-tune corpus (~1900 h) before landing here.
+
+TRANSFER_MARKS = ".,!?"
+_word_norm_re = re.compile(r"[^а-яa-z0-9]+")
+_tok_re = re.compile(rf"^(.*?)([{re.escape(TRANSFER_MARKS)}]*)$")
+
+
+def _norm_word(w: str) -> str:
+    return _word_norm_re.sub("", w.lower().replace("ё", "е"))
+
+
+def split_trailing_punct(text: str) -> tuple[list[str], list[str]]:
+    """-> (words with trailing ``.,!?`` stripped, one trailing mark per word or '')."""
+    words, puncts = [], []
+    for tok in str(text).split():
+        m = _tok_re.match(tok)
+        w, p = m.group(1), m.group(2)
+        if not w:
+            continue
+        words.append(w)
+        puncts.append(p[-1] if p else "")
+    return words, puncts
+
+
+def transfer_punctuation(reference: str, hypothesis: str, min_match: float = 0.6) -> tuple[str | None, float]:
+    """Copy trailing punctuation from ``hypothesis`` onto ``reference`` words.
+
+    Words are aligned with difflib on normalized forms (lower, ё->е, letters and
+    digits only), so ASR word errors do not derail the copy. Returns
+    ``(new_text, matched_fraction)``; ``new_text`` is ``None`` when fewer than
+    ``min_match`` of the reference words aligned (unreliable hypothesis — leave
+    the reference untouched). The terminal mark falls back to '.' when the
+    hypothesis did not supply one.
+    """
+    gw, _ = split_trailing_punct(reference)
+    hw, hp = split_trailing_punct(hypothesis)
+    if not gw or not hw:
+        return None, 0.0
+    gn = [_norm_word(w) for w in gw]
+    hn = [_norm_word(w) for w in hw]
+    sm = difflib.SequenceMatcher(None, gn, hn, autojunk=False)
+    new_p = [""] * len(gw)
+    matched = 0
+    for a, b, size in sm.get_matching_blocks():
+        for k in range(size):
+            new_p[a + k] = hp[b + k]
+            matched += 1
+    frac = matched / len(gw)
+    if frac < min_match:
+        return None, frac
+    # exact membership: `"" in ".!?"` is True (substring test), which would
+    # silently skip the fallback for hypotheses lacking a terminal mark
+    if new_p[-1] not in (".", "!", "?"):
+        new_p[-1] = "."
+    return " ".join(w + p for w, p in zip(gw, new_p)), frac
 
 
 class PunctuationMetric(BaseMetric):
@@ -17,10 +82,12 @@ class PunctuationMetric(BaseMetric):
 
     Note on "text + audio" punctuation: a single open model that jointly ingests
     a reference transcript AND audio to place punctuation is not readily
-    available. The two practical routes are text-restoration (``silero``;
-    RUPunct is an alternative) and audio-native punctuating ASR (``asr`` —
-    GigaAM-v3 e2e / Whisper produce punctuation from the audio). ``asr`` is the
-    closest to "by audio".
+    available, but the combination IS: the ``GigaAMv3`` metric transcribes the
+    audio with a punctuating ASR and transfers the heard punctuation onto the
+    reference words via ``transfer_punctuation`` (its ``text_punctuated``
+    column). Prefer it for Russian — it keeps the human words and grounds every
+    mark in the acoustics; ``silero`` remains the text-only fallback and
+    ``asr`` the raw audio-transcript route.
     """
 
     name = "❡ Punctuation"

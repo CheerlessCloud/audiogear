@@ -120,11 +120,24 @@ A dedicated punctuation model can additionally fill a **separate column** via
   ASR (Whisper).
 
 > "Punctuation from text *and* audio": no single open model jointly ingests a
-> reference transcript and audio. The practical routes are text-restoration
-> (`silero`) and audio-native punctuating ASR (`asr`). **GigaAM-v3 e2e**
-> (`e2e_rnnt`/`e2e_ctc`) is the best single model here — it outputs punctuated,
-> normalized Russian text straight from the audio; point a `GigaAMBackend` at a
-> v3 e2e variant once v3 is installed and `text` gets punctuation for free.
+> reference transcript and audio — but the combination is built in. The
+> **`GigaAMv3` metric** (`configs/metric/gigaam_v3.yaml`) transcribes the audio
+> with **GigaAM-v3 e2e** (punctuated, normalized Russian straight from the
+> acoustics) and *transfers* the heard punctuation onto the reference words:
+> difflib word alignment on normalized forms, trailing `.,!?` copied per word,
+> row skipped when fewer than `min_match` (60%) of words align. One GPU pass
+> yields three columns: `gigaam3_text` (raw hypothesis), `gigaam3_cer`
+> (agreement filter vs `text`) and `text_punctuated` (reference words + audio
+> punctuation — the recommended training text). This is the pipeline that
+> punctuated the VoXtream-RU corpus (~1900 h): human words stay the truth for
+> phonemization, the ASR contributes the pauses and question marks it heard.
+
+```yaml
+- _target_: audiogear.pipeline.metrics.gigaam_v3.GigaAMv3
+  model_name: v3_e2e_rnnt   # or v3_e2e_ctc (faster, slightly less accurate)
+  punct_column: text_punctuated   # null -> transcript+CER only
+  min_match: 0.6
+```
 
 ## Quickstart
 

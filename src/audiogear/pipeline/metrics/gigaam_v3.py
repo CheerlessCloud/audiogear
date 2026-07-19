@@ -8,7 +8,11 @@ was produced by GigaChat Max Audio from the audio track). One pass gives both:
 - ``gigaam3_text`` — punctuated hypothesis, a source to transfer punctuation
   onto a reference transcript (word-align, copy trailing marks);
 - ``gigaam3_cer``  — agreement filter vs ``segment.text`` (same normalization
-  as ``whisper_cer``; ``-1`` when the segment has no reference text).
+  as ``whisper_cer``; ``-1`` when the segment has no reference text);
+- ``text_punctuated`` — ``segment.text`` WORDS with the hypothesis punctuation
+  transferred onto them (``transfer_punctuation``): human words stay the truth
+  for phonemization, the ASR contributes the pauses/question marks it heard.
+  Empty when there is no reference or fewer than ``min_match`` words aligned.
 
 Batched: encoder forward + RNNT/CTC decode both take real batches.
 """
@@ -18,6 +22,7 @@ from __future__ import annotations
 from audiogear.audio import load_audio
 from audiogear.data import AudioSegment
 from audiogear.pipeline.metrics.base import BaseMetric
+from audiogear.pipeline.metrics.punctuation import transfer_punctuation
 from audiogear.pipeline.metrics.wer import normalize_text
 from audiogear.pipeline.readers.base import BaseDiskReader
 from audiogear.pipeline.writers.base_disk import DiskWriter
@@ -41,14 +46,23 @@ class GigaAMv3(BaseMetric):
         device: str = "cuda",
         text_column: str = "gigaam3_text",
         cer_column: str = "gigaam3_cer",
+        punct_column: str | None = "text_punctuated",
+        min_match: float = 0.6,
         batch_size: int = 16,
         max_batch_seconds: float = 320.0,
         chunk_seconds: float = 20.0,
         file_writer: DiskWriter = None,
         file_reader: BaseDiskReader = None,
     ):
+        """punct_column: column for ``segment.text`` with the hypothesis
+        punctuation transferred onto it; ``null`` disables the third column.
+        min_match: minimum fraction of reference words that must align with the
+        hypothesis for the transfer to be trusted (below it -> empty string)."""
+        metric = (text_column, cer_column)
+        if punct_column:
+            metric += (punct_column,)
         super().__init__(
-            metric=(text_column, cer_column),
+            metric=metric,
             file_writer=file_writer,
             file_reader=file_reader,
             chunk_seconds=chunk_seconds,
@@ -57,10 +71,14 @@ class GigaAMv3(BaseMetric):
         )
         self.model_name = model_name
         self.device = device
+        self.punct_column = punct_column
+        self.min_match = min_match
 
     def _failed_value(self):
-        # The text column is a string — an empty hypothesis (not NaN) keeps the
-        # CSV typed; CER -1 matches the "could not score" convention.
+        # The string columns get empty strings (not NaN) so the CSV stays typed;
+        # CER -1 matches the "could not score" convention.
+        if self.punct_column:
+            return "", -1.0, ""
         return "", -1.0
 
     def _model_on(self, device: str):
@@ -92,9 +110,11 @@ class GigaAMv3(BaseMetric):
         import jiwer
 
         reference = normalize_text(segment.text or "")
-        if not reference:
-            return hypothesis, -1.0
-        return hypothesis, float(jiwer.cer(reference, normalize_text(hypothesis)))
+        cer = -1.0 if not reference else float(jiwer.cer(reference, normalize_text(hypothesis)))
+        if not self.punct_column:
+            return hypothesis, cer
+        transferred, _ = transfer_punctuation(segment.text or "", hypothesis, self.min_match)
+        return hypothesis, cer, transferred or ""
 
     def compute_batch(self, segments: list[AudioSegment]):
         device = normalize_device(self.device)
