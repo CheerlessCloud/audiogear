@@ -9,9 +9,9 @@
 #   # dry run on 10 clips:
 #   uv run python process.py --config-name annotate reader.limit=10
 #
-# Consensus runs N ASR backends and keeps the medoid hypothesis (lowest mean
-# pairwise CER) — robust to any single model failing. Comment out backends you
-# haven't installed (T-one needs a git install; Voxtral is a ~9 GB download).
+# This compatible asr-extra baseline compares GigaAM and Whisper in one process.
+# Two candidates provide agreement diagnostics but cannot reject an outlier. Use
+# staged CandidateTranscriber runs and annotate_consensus.yaml for four models.
 defaults:
   - reader: ru
   - writer: csv
@@ -43,21 +43,13 @@ metrics:
     overwrite_text: true      # write the chosen transcript into `text`
     min_agreement: 0.5        # flag clips the models disagree on (asr_low_confidence)
     backends:
-      # Active by default — both install cleanly with the `asr` extra and top
-      # the open Russian ASR leaderboards.
+      # Both backends install together with the `asr` extra.
       - _target_: audiogear.pipeline.transcribers.backends.GigaAMBackend
         model_name: v2_rnnt    # pip gigaam ships up to v2; v3 = manual (see backend docstring)
         device: ${device}
       - _target_: audiogear.pipeline.transcribers.backends.WhisperBackend
         model_name: large-v3
         language: ru
-        device: ${device}
-      # T-one (t-tech) — third backend for a more robust 3-model consensus.
-      # Install once: uv sync --extra tone   (or: uv pip install
-      #   "tone @ git+https://github.com/voicekit-team/T-one.git")
-      # If not installed it raises on load; consensus catches that, drops this
-      # hypothesis, and carries on — remove this entry to silence the warning.
-      - _target_: audiogear.pipeline.transcribers.backends.ToneBackend
         device: ${device}
       # Tip: GigaAM-v3 e2e (e2e_rnnt) outputs punctuated text directly — set a
       # GigaAMBackend model_name to a v3 e2e variant once v3 is installed, and

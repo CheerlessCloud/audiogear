@@ -16,21 +16,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from itertools import combinations
 
 from loguru import logger
 
 from audiogear.data import AudioPipeline, AudioSegment
 from audiogear.pipeline.base import PipelineStep
 from audiogear.pipeline.checkpoint import MetricCheckpoint, fingerprint_audio_file, inputFingerprintField
-from audiogear.pipeline.metrics.wer import normalize_text
 from audiogear.pipeline.transcribers.base import ASRBackend
+from audiogear.pipeline.transcribers.selection import (
+    TranscriptionCandidate,
+    punctuationPattern,
+    select_candidate,
+)
 from audiogear.utils.progress import tqdm
 from audiogear.utils.runtime import free_cuda, is_oom_error
-
-# sentence punctuation marks used to detect whether a hypothesis is punctuated
-_PUNCT_RE = re.compile(r"[.,!?…;:—]")
 
 
 class ConsensusTranscriber(PipelineStep):
@@ -110,42 +109,29 @@ class ConsensusTranscriber(PipelineStep):
 
     @staticmethod
     def _agreement(hyps: list[str]) -> tuple[int, float, list[float]]:
-        """Return (medoid index, agreement in [0,1], per-hyp mean CER) over hyps."""
-        n = len(hyps)
-        if n == 1:
-            return 0, 1.0, [0.0]
-
-        import jiwer
-
-        norm = [normalize_text(h) for h in hyps]
-        # pairwise CER matrix (symmetric-ish; we average both directions)
-        dist = [[0.0] * n for _ in range(n)]
-        for i, j in combinations(range(n), 2):
-            a, b = norm[i], norm[j]
-            if not a and not b:
-                d = 0.0
-            elif not a or not b:
-                d = 1.0
-            else:
-                d = float(jiwer.cer(a, b))
-            dist[i][j] = dist[j][i] = min(d, 1.0)
-        mean_dist = [sum(row) / (n - 1) for row in dist]
-        medoid = min(range(n), key=lambda i: mean_dist[i])
-        agreement = 1.0 - mean_dist[medoid]
-        return medoid, max(0.0, agreement), mean_dist
+        candidate_order = [str(index) for index in range(len(hyps))]
+        candidates = [
+            TranscriptionCandidate(candidate_id=candidate_id, status="ok", text=text)
+            for candidate_id, text in zip(candidate_order, hyps)
+        ]
+        selection = select_candidate(candidates, candidate_order, prefer_punctuated=False)
+        medoid = int(selection.medoid_candidate_id)
+        agreement = selection.agreement if selection.agreement is not None else 1.0
+        mean_distances = [selection.mean_distances[candidate_id] for candidate_id in candidate_order]
+        return medoid, agreement, mean_distances
 
     @staticmethod
     def _has_punctuation(text: str) -> bool:
-        return bool(_PUNCT_RE.search(text))
+        return punctuationPattern.search(text) is not None
 
     def _process(self, segment: AudioSegment) -> bool:
-        hypotheses: list[str] = []
-        successful_backends: list[ASRBackend] = []
+        candidates: list[TranscriptionCandidate] = []
         has_successful_backend_call = False
         for backend in self.backends:
             output_column = f"asr_text_{backend.name}"
             segment.metadata[output_column] = ""
             if backend.name in self._dead:
+                candidates.append(TranscriptionCandidate(backend.name, "error", ""))
                 continue
             try:
                 text = backend.transcribe(segment.audio_file)
@@ -154,49 +140,37 @@ class ConsensusTranscriber(PipelineStep):
             except (ImportError, ModuleNotFoundError) as error:
                 self._dead.add(backend.name)
                 logger.warning(
-                    f"ASR backend {backend.name} unavailable "
-                    f"({type(error).__name__}: {error}); disabling for this run"
+                    f"ASR backend {backend.name} unavailable ({type(error).__name__}: {error}); disabling for this run"
                 )
+                candidates.append(TranscriptionCandidate(backend.name, "error", ""))
                 continue
             except Exception as error:  # noqa: BLE001 — per-clip failure, keep the backend
                 if is_oom_error(error):
                     free_cuda()
                 logger.warning(f"ASR backend {backend.name} failed on {segment.audio_file}: {error}")
+                candidates.append(TranscriptionCandidate(backend.name, "error", ""))
                 continue
             has_successful_backend_call = True
             segment.metadata[output_column] = text
-            if text.strip():
-                hypotheses.append(text)
-                successful_backends.append(backend)
+            status = "ok" if text.strip() else "no_speech"
+            candidates.append(TranscriptionCandidate(backend.name, status, text))
 
-        if not hypotheses:
+        candidate_order = [backend.name for backend in self.backends]
+        selection = select_candidate(candidates, candidate_order, self.prefer_punctuated)
+        if selection.status == "no_candidate":
             segment.metadata["asr_chosen_backend"] = ""
             segment.metadata["asr_agreement"] = 0.0
             if self.min_agreement is not None:
                 segment.metadata["asr_low_confidence"] = 0.0 < self.min_agreement
             return has_successful_backend_call
 
-        hyps = hypotheses
-        live = successful_backends
-
-        medoid, agreement, mean_dist = self._agreement(hyps)
-
-        # The agreement winner is the medoid; but for the SAVED text prefer a
-        # punctuated hypothesis (punctuation that an audio-aware ASR produced),
-        # choosing the punctuated one closest to the consensus.
-        chosen_idx = medoid
-        if self.prefer_punctuated and not self._has_punctuation(hyps[medoid]):
-            punct = [i for i, h in enumerate(hyps) if h.strip() and self._has_punctuation(h)]
-            if punct:
-                chosen_idx = min(punct, key=lambda i: mean_dist[i])
-
-        chosen = hyps[chosen_idx]
-        segment.metadata["asr_chosen_backend"] = live[chosen_idx].name
+        agreement = selection.agreement if selection.agreement is not None else 1.0
+        segment.metadata["asr_chosen_backend"] = selection.selected_candidate_id
         segment.metadata["asr_agreement"] = round(agreement, 4)
         if self.min_agreement is not None:
             segment.metadata["asr_low_confidence"] = agreement < self.min_agreement
-        if self.overwrite_text and chosen:
-            segment.text = chosen
+        if self.overwrite_text and selection.selected_text:
+            segment.text = selection.selected_text
         return has_successful_backend_call
 
     def _open_checkpoint(self, rank: int) -> dict[str, dict]:

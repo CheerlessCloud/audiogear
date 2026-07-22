@@ -60,43 +60,48 @@ no metadata are supported too via `reader=folder`.
 
 ## Annotating unlabeled audio (multi-ASR)
 
-Some datasets ship audio with **no transcript** (e.g. `rootreck_fallout4` —
-speaker/gender from folder names, empty `text`). `configs/annotate.yaml` fills
-`text` in via **multi-ASR consensus**: it runs several Russian ASR models and
-keeps the medoid hypothesis (lowest mean pairwise CER), robust to any single
-model failing.
+Some datasets ship audio with no transcript. `configs/annotate.yaml` provides a
+compatible single-environment baseline using GigaAM and Whisper from the `asr`
+extra:
 
 ```bash
-# Transcribe a whole dataset (writes the chosen transcript into `text`):
+uv sync --extra asr
 uv run python process.py --config-name annotate \
   reader.data_folder=/path/to/your/dataset
-
-# Dry run on 10 clips:
-uv run python process.py --config-name annotate reader.limit=10
 ```
 
-Backends (in `configs/annotate.yaml`), all Russian-capable and open:
+Its two hypotheses provide a useful agreement diagnostic, but two models cannot
+identify which hypothesis is the outlier. Don't treat this preset as robust
+medoid consensus.
 
-| Backend | Class | Install | Notes |
-|---------|-------|---------|-------|
-| **GigaAM** | `GigaAMBackend` | `asr` extra | pip ships v2 (`v2_rnnt`); v3 (`ai-sage/GigaAM-v3`) is manual |
-| **Whisper** | `WhisperBackend` | `asr` extra | faster-whisper `large-v3` |
-| **T-one** | `ToneBackend` | `uv pip install "tone @ git+https://github.com/voicekit-team/T-one.git"` | t-tech streaming Conformer-CTC |
-| **Qwen3-ASR** | `Qwen3ASRBackend` | `qwen3` extra | official Transformers API; default `Qwen/Qwen3-ASR-1.7B` |
+For four-model consensus, run each backend in its compatible environment with a
+`CandidateTranscriber`, persist unique status/text columns, then reduce the
+combined rows with `ConsensusSelector`. The backends and extras are:
 
-GigaAM + Whisper are active by default; uncomment T-one in
-`configs/annotate.yaml` once installed. Add another model by subclassing
-`ASRBackend` and adding it to the `backends:` list. The block also emits each
-model's transcript (`asr_text_<name>`) and an `asr_agreement` score; set
-`min_agreement` to flag low-confidence clips (`asr_low_confidence`).
+| Candidate | Backend | Extra |
+|-----------|---------|-------|
+| GigaAM | `GigaAMBackend` | `asr` |
+| Whisper | `WhisperBackend` | `asr` |
+| T-one | `ToneBackend` | `tone` |
+| Qwen3-ASR | `Qwen3ASRBackend` | `qwen3` |
 
-Example output (10 `rootreck_fallout4` clips, GigaAM-v2 + Whisper-large-v3):
+Each candidate run must use its own columns, for example
+`asr_gigaam_status`/`asr_text_gigaam`. Chain each output CSV into the next run or
+join the four outputs by full `id`, preserving those columns. Error rows always
+have blank text and one of `out_of_memory`, `dependency_error`, `invalid_result`,
+or `inference_error`.
 
-```
-[000A2AE7_1.wav] speaker=rootreck_fallout4:NPCFCait
-   gigaam : охренеть прыгать оттуда очень тупо
-   whisper: Охренеть! Прыгать оттуда очень тупо.
-   -> CHOSEN (gigaam, agree=1.0): охренеть прыгать оттуда очень тупо
+`configs/annotate_qwen3.yaml` is a staged Qwen candidate preset.
+`configs/annotate_consensus.yaml` expects the GigaAM, Whisper, T-one, and Qwen3
+status/text columns and performs the model-free reduction. It records the
+eligible candidates, all pairwise and mean CER distances, medoid, selected
+candidate/text, agreement, and punctuation preference decision. Run the reducer
+in the base environment after pointing it at the accumulated metadata:
+
+```bash
+uv sync
+uv run python process.py --config-name annotate_consensus \
+  reader.data_folder=/path/to/accumulated-candidates
 ```
 
 ### Qwen3 ASR and reference alignment
@@ -109,19 +114,14 @@ uv run python process.py --config-name annotate_qwen3
 uv run python process.py --config-name align_qwen3
 ```
 
-`annotate_qwen3` uses `Qwen3ASRBackend` with `Qwen/Qwen3-ASR-1.7B`, Russian,
-BF16, inference batch size 1, and `max_new_tokens=256`. Other backend defaults
-are an unset `revision`, empty `context`, name `qwen3`, and device `cuda`
-(resolved to logical `cuda:0` after worker pinning). It processes every row,
-writes `asr_text_qwen3`, and preserves the existing `text` reference exactly.
-It calls the official `Qwen3ASRModel.from_pretrained(...).transcribe(...)`
-Transformers wrapper. Use
-the 0.6B ASR with only this Hydra override:
-
-```bash
-uv run python process.py --config-name annotate_qwen3 \
-  metrics.0.backends.0.model_name_or_path=Qwen/Qwen3-ASR-0.6B
-```
+`annotate_qwen3` runs `Qwen3ASRBackend` through `CandidateTranscriber` with
+`Qwen/Qwen3-ASR-1.7B` pinned to revision
+`7278e1e70fe206f11671096ffdd38061171dd6e5`, Russian, BF16, inference batch
+size 1, and `max_new_tokens=256`. It writes `asr_qwen3_candidate_id`,
+`asr_qwen3_status`, `asr_text_qwen3`, and `asr_qwen3_error_code` while preserving
+the existing `text`. It calls the official
+`Qwen3ASRModel.from_pretrained(...).transcribe(...)` wrapper. When switching to
+the 0.6B repository, also set that repository's full immutable revision.
 
 `align_qwen3` doesn't transcribe and never overwrites `text`. It sends the
 existing reference text directly to `Qwen3ForcedAligner.align(audio, text,
@@ -305,7 +305,9 @@ Each block is a `PipelineStep`; metric blocks add columns to each clip's metadat
 | Emotion | `EmotionMetric` | `emotion_pred`, `emotion_score` | RU DUSHA HuBERT | core |
 | Accent (EN) | `AccentMetric` | `accent` | SpeechBrain ECAPA | (speechbrain) |
 | HF model (any) | `HFAudioModelMetric` | configurable | 🤗 audio model (classification/regression) | core |
-| Consensus ASR | `ConsensusTranscriber` | `text`, `asr_text_*`, `asr_chosen_backend`, `asr_agreement`, optional `asr_low_confidence` | GigaAM+Whisper+T-one+Qwen3 | `asr` / `tone` / `qwen3` |
+| In-process ASR comparison | `ConsensusTranscriber` | `text`, `asr_text_*`, `asr_chosen_backend`, `asr_agreement`, optional `asr_low_confidence` | compatible backends in one environment | backend-specific |
+| Staged ASR candidate | `CandidateTranscriber` | configured candidate/status/text/error columns | one backend per run | backend-specific |
+| Staged ASR reduction | `ConsensusSelector` | medoid, selected text, eligible/pairwise/mean/agreement/punctuation fields | persisted candidates, no model load | core |
 | Qwen3 reference alignment | `Qwen3ForcedAlignmentMetric` | `qwen3_alignment`, `qwen3_alignment_status` | `Qwen/Qwen3-ForcedAligner-0.6B` | `qwen3` |
 | Senko diarization | `SenkoDiarizationMetric` | `senko_segments`, `senko_raw_segments`, `senko_num_speakers`, `senko_timing`, `senko_status` | pinned Senko, CUDA embeddings + Silero VAD + CPU clustering | `senko` |
 | Speaker labeling | `SpeakerLabeler` | `speaker`, `speaker_conf`, `speaker_margin` | pyannote embed + clustering | `diarization` |
@@ -317,11 +319,11 @@ brouhaha, diarization, accent are config-gated.
 
 ## Two new capabilities worth calling out
 
-- **Consensus transcription** — for clips without a transcript, run several ASR
-  models (GigaAM-v2, Whisper-large-v3, a wav2vec2 model) and keep the *medoid*
-  hypothesis (lowest mean pairwise CER), with an `asr_agreement` confidence.
-  Robust to any single model hallucinating. Backends are pluggable — add a 4th
-  by subclassing `ASRBackend`.
+- **Staged consensus transcription** — run GigaAM, Whisper, T-one, and Qwen3 in
+  separate compatible environments with `CandidateTranscriber`, persist their
+  invariant status/text pairs, then use `ConsensusSelector` to keep the medoid
+  hypothesis and record agreement. Four candidates can isolate one outlier;
+  the two-backend `annotate.yaml` baseline cannot.
 - **Speaker labeling with confidence thresholds** — for datasets missing speaker
   ids, embed + cluster all clips and assign an id only when it is safe
   (similarity to the cluster centroid ≥ threshold **and** a clear margin over the
@@ -538,11 +540,12 @@ them for a curated default. For a fully custom block, write a `BaseMetric` inste
 3. Enable it by adding it to the `metrics:` list of a dataset config (e.g.
    `configs/resd.yaml`) with its `_target_`.
 
-### Add an ASR backend to the consensus
+### Add an ASR backend
 
-The consensus transcriber (see below) ensembles any number of `ASRBackend`s. A
-backend wraps one model behind `transcribe(path) -> str` with **lazy, cached**
-loading (so it pickles cheaply to a worker and loads once per process):
+An `ASRBackend` wraps one model behind `transcribe(path) -> str` with lazy,
+cached loading. Use it inside `ConsensusTranscriber` only when all configured
+backends share one environment. Otherwise wrap one backend per run with
+`CandidateTranscriber` and reduce persisted outputs with `ConsensusSelector`.
 
 ```python
 from audiogear.pipeline.transcribers.base import ASRBackend
@@ -565,18 +568,17 @@ class MyASRBackend(ASRBackend):
         return self.model.transcribe(audio_file)
 ```
 
-Then list it under `backends:` in `configs/annotate.yaml` (or any config that uses
-`ConsensusTranscriber`). Built-ins: `GigaAMBackend`, `WhisperBackend`,
-`Wav2Vec2Backend`, `ToneBackend`. A backend that fails to *load* (e.g. an optional
-one that isn't installed) is disabled after one warning instead of crashing the
-run; a per-clip failure just drops that hypothesis.
+Built-ins are `GigaAMBackend`, `WhisperBackend`, `Wav2Vec2Backend`,
+`ToneBackend`, and `Qwen3ASRBackend`. `configs/annotate.yaml` contains only the
+compatible GigaAM and Whisper pair. T-one and Qwen belong in separate staged
+candidate runs.
 
 ### How the consensus transcriber works
 
-`ConsensusTranscriber` runs every backend on a clip and picks the **medoid** — the
-hypothesis with the lowest mean pairwise CER to the others (a correct transcript
-is close to the other correct ones; a hallucination sits far from the pack). It
-writes:
+`ConsensusTranscriber` runs compatible backends in one process and picks the
+hypothesis with the lowest mean symmetric pairwise CER. `ConsensusSelector`
+applies the same pure selection to candidate status/text columns persisted by
+separate jobs. The in-process block writes:
 
 - `asr_text_<name>` — each backend's raw transcript,
 - `text` — the chosen transcript (when `overwrite_text: true`),
@@ -584,10 +586,11 @@ writes:
   when `min_agreement` is set.
 
 `only_missing: true` transcribes only clips with empty `text`. `prefer_punctuated:
-true` keeps the medoid for *scoring* but saves the punctuated hypothesis closest
-to it into `text` (so you keep audio-derived punctuation from e.g. Whisper, even
-when the medoid is an unpunctuated model like GigaAM v2). See `configs/annotate.yaml`
-for a ready 2–3 backend setup.
+true` keeps the medoid for scoring but saves the punctuated hypothesis closest
+to it. `configs/annotate.yaml` is a two-backend diagnostic baseline, not robust
+outlier rejection. For the four-model flow, use unique candidate columns and
+`configs/annotate_consensus.yaml`; missing or contradictory persisted columns
+fail the reducer instead of silently dropping a model.
 
 ### Add a reader, writer, or dataset
 - Reader/writer: subclass `BaseDiskReader` / `DiskWriter` and add a `configs/reader`

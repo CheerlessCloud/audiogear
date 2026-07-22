@@ -7,12 +7,14 @@ needed for a new model:
 
     - _target_: audiogear.pipeline.metrics.hf.HFAudioModelMetric
       model_id: alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech
+      revision: <full 40-character commit hash>
       metric: gender_pred
       mode: classification
       output: label            # top-1 label string
 
     - _target_: audiogear.pipeline.metrics.hf.HFAudioModelMetric
       model_id: <some-regression-model>
+      revision: <full 40-character commit hash>
       metric: [arousal, dominance, valence]
       mode: regression         # 3 head outputs -> 3 columns
 
@@ -25,8 +27,11 @@ model cache, and the CUDA-OOM ladder (windowed GPU → CPU) are all inherited fr
 
 from __future__ import annotations
 
+import json
+
 from audiogear.audio import load_audio
 from audiogear.data import AudioSegment
+from audiogear.pipeline.hf_snapshot import normalize_allow_patterns, resolve_hf_snapshot, validate_hf_revision
 from audiogear.pipeline.metrics.base import BaseMetric
 from audiogear.pipeline.readers.base import BaseDiskReader
 from audiogear.pipeline.writers.base_disk import DiskWriter
@@ -37,8 +42,9 @@ class HFAudioModelMetric(BaseMetric):
     """A HuggingFace audio model applied per clip, configured from YAML.
 
     Args:
-        model_id: HF hub id or local path.
+        model_id: HF Hub repository.
         metric: output column name (str) or names (tuple, for multi-output).
+        revision: full 40-character HF commit hash.
         mode: ``"classification"`` (logits -> label/score) or ``"regression"``
             (logits -> raw float values).
         output: mapping strategy for classification — ``"label"`` (top label
@@ -49,6 +55,8 @@ class HFAudioModelMetric(BaseMetric):
         sampling_rate: rate the feature extractor expects (16 kHz for wav2vec2/
             hubert).
         trust_remote_code: pass through for models shipping a custom architecture.
+        local_files_only: resolve the immutable snapshot from the local HF cache only.
+        allow_patterns: optional snapshot file allow-pattern override.
     """
 
     gpu = True
@@ -59,18 +67,39 @@ class HFAudioModelMetric(BaseMetric):
         self,
         model_id: str,
         metric,
+        revision: str,
         mode: str = "classification",
         output: str = "label",
         label: str | None = None,
         device: str = "cuda",
         sampling_rate: int = 16000,
         trust_remote_code: bool = False,
+        local_files_only: bool = False,
+        allow_patterns: tuple[str, ...] | list[str] | None = None,
         chunk_seconds: float = 20.0,
         batch_size: int = 16,
         max_batch_seconds: float = 480.0,
         file_writer: DiskWriter = None,
         file_reader: BaseDiskReader = None,
     ):
+        validate_hf_revision(revision)
+        normalized_allow_patterns = normalize_allow_patterns(allow_patterns)
+        checkpoint_identity = json.dumps(
+            {
+                "model_id": model_id,
+                "revision": revision,
+                "local_files_only": local_files_only,
+                "allow_patterns": normalized_allow_patterns,
+                "mode": mode,
+                "output": output,
+                "label": label,
+                "device": device,
+                "sampling_rate": sampling_rate,
+                "trust_remote_code": trust_remote_code,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         super().__init__(
             metric=metric,
             file_writer=file_writer,
@@ -78,29 +107,54 @@ class HFAudioModelMetric(BaseMetric):
             chunk_seconds=chunk_seconds,
             batch_size=batch_size,
             max_batch_seconds=max_batch_seconds,
+            checkpoint_identity=checkpoint_identity,
         )
         if mode not in ("classification", "regression"):
             raise ValueError(f"mode must be 'classification' or 'regression', got {mode!r}")
         self.model_id = model_id
+        self.revision = revision
         self.mode = mode
         self.output = output
         self.label = label
         self.device = device
         self.sampling_rate = sampling_rate
         self.trust_remote_code = trust_remote_code
+        self.local_files_only = local_files_only
+        self.allow_patterns = normalized_allow_patterns
 
     # --- model / feature extractor (process-global cache) ---------------------
+    @property
+    def snapshot_path(self) -> str:
+        return resolve_hf_snapshot(
+            self.model_id,
+            self.revision,
+            self.local_files_only,
+            self.allow_patterns,
+        )
+
     def _model_on(self, device: str):
         def build():
             import torch
             from transformers import AutoModelForAudioClassification
 
             model = AutoModelForAudioClassification.from_pretrained(
-                self.model_id, trust_remote_code=self.trust_remote_code
+                self.snapshot_path,
+                trust_remote_code=self.trust_remote_code,
+                local_files_only=True,
             )
             return model.to(device).eval() if device != "cpu" else model.to(torch.device("cpu")).eval()
 
-        return cached_model((type(self).__name__, "model", self.model_id, device), build)
+        cache_key = (
+            type(self).__name__,
+            "model",
+            self.model_id,
+            self.revision,
+            self.local_files_only,
+            self.allow_patterns,
+            self.trust_remote_code,
+            device,
+        )
+        return cached_model(cache_key, build)
 
     @property
     def extractor(self):
@@ -108,24 +162,33 @@ class HFAudioModelMetric(BaseMetric):
             from transformers import AutoFeatureExtractor
 
             return AutoFeatureExtractor.from_pretrained(
-                self.model_id, trust_remote_code=self.trust_remote_code
+                self.snapshot_path,
+                trust_remote_code=self.trust_remote_code,
+                local_files_only=True,
             )
 
-        return cached_model((type(self).__name__, "extractor", self.model_id), build)
+        cache_key = (
+            type(self).__name__,
+            "extractor",
+            self.model_id,
+            self.revision,
+            self.local_files_only,
+            self.allow_patterns,
+            self.trust_remote_code,
+        )
+        return cached_model(cache_key, build)
 
     # --- forward + output mapping --------------------------------------------
     def _forward(self, audios: list, device: str):
         """Run the model on a list of 1-D float waveforms; return logits (B, K)."""
         import torch
 
-        inputs = self.extractor(
-            audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True
-        )
+        inputs = self.extractor(audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             return self._model_on(device)(**inputs).logits  # (B, K)
 
-    def _map(self, logits) -> list:
+    def _map(self, logits, device: str) -> list:
         """Map a (B, K) logits tensor to one metric value per row."""
         import torch
 
@@ -138,7 +201,7 @@ class HFAudioModelMetric(BaseMetric):
 
         # classification
         probs = torch.softmax(logits.float(), dim=-1).cpu()
-        id2label = self._model_on(self.device).config.id2label
+        id2label = self._model_on(device).config.id2label
         out = []
         for row in probs:
             top = int(row.argmax())
@@ -168,7 +231,7 @@ class HFAudioModelMetric(BaseMetric):
     # --- BaseMetric hooks -----------------------------------------------------
     def compute_batch(self, segments: list[AudioSegment]):
         logits = self._forward([self._load_1d(s) for s in segments], self.device)
-        return self._map(logits)
+        return self._map(logits, self.device)
 
     def compute_metric(self, segment: AudioSegment):
         return self.compute_batch([segment])[0]
@@ -185,7 +248,7 @@ class HFAudioModelMetric(BaseMetric):
             n += 1
         if n == 0:  # empty/zero-length clip
             return self._failed_value()
-        return self._map(acc / n)[0]
+        return self._map(acc / n, device)[0]
 
     def compute_metric_recover(self, segment: AudioSegment):
         return self._windowed(segment, self.device)

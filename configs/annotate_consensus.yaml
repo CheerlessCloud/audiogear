@@ -1,0 +1,40 @@
+defaults:
+  - reader: csv
+  - writer: csv
+  - executor: local
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+reader:
+  data_folder: ${oc.env:AUDIOGEAR_DATA_DIR,data/your_dataset}
+  glob_pattern: metadata.csv
+  limit: -1
+
+writer:
+  output_folder: outputs
+  output_filename: consensus_$rank.csv
+  sep: "|"
+
+metrics:
+  - _target_: audiogear.pipeline.transcribers.selector.ConsensusSelector
+    overwrite_text: true
+    prefer_punctuated: true
+    candidates:
+      - candidate_id: gigaam
+        status_column: asr_gigaam_status
+        text_column: asr_text_gigaam
+      - candidate_id: whisper
+        status_column: asr_whisper_status
+        text_column: asr_text_whisper
+      - candidate_id: tone
+        status_column: asr_tone_status
+        text_column: asr_text_tone
+      - candidate_id: qwen3
+        status_column: asr_qwen3_status
+        text_column: asr_text_qwen3

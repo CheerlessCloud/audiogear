@@ -2,14 +2,16 @@ from audiogear.pipeline.metrics.hf import HFAudioModelMetric
 from audiogear.pipeline.readers.base import BaseDiskReader
 from audiogear.pipeline.writers.base_disk import DiskWriter
 
+emotionRevision = "2eaa20433d7e6d5be7587b5f9f0057527ed274ba"
+
 
 class EmotionMetric(HFAudioModelMetric):
     """Speech-emotion classification (opt-in).
 
     A thin preset over :class:`HFAudioModelMetric`. Defaults to a Russian HuBERT
     model fine-tuned on DUSHA; emits the top label and its score into
-    ``emotion_pred`` / ``emotion_score``. Swap ``model_id`` for another
-    checkpoint (e.g. an English IEMOCAP model) via config.
+    ``emotion_pred`` / ``emotion_score``. Set ``model_id`` and its full
+    ``revision`` to use another checkpoint.
     """
 
     name = "🥴 Emotion"
@@ -17,6 +19,8 @@ class EmotionMetric(HFAudioModelMetric):
     def __init__(
         self,
         model_id: str = "xbgoose/hubert-large-speech-emotion-recognition-russian-dusha-finetuned",
+        revision: str = emotionRevision,
+        local_files_only: bool = False,
         device: str = "cuda",
         batch_size: int = 16,
         max_batch_seconds: float = 480.0,
@@ -27,9 +31,11 @@ class EmotionMetric(HFAudioModelMetric):
         super().__init__(
             model_id=model_id,
             metric=("emotion_pred", "emotion_score"),
+            revision=revision,
             mode="classification",
             output="label_score",
             device=device,
+            local_files_only=local_files_only,
             batch_size=batch_size,
             max_batch_seconds=max_batch_seconds,
             chunk_seconds=chunk_seconds,

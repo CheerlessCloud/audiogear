@@ -30,18 +30,18 @@ executor:
   logging_dir: logs/qwen3_annotation
 
 metrics:
-  - _target_: audiogear.pipeline.transcribers.consensus.ConsensusTranscriber
-    only_missing: false
-    overwrite_text: false
-    prefer_punctuated: true
-    max_consecutive_failures: 10
-    backends:
-      - _target_: audiogear.pipeline.transcribers.qwen3.Qwen3ASRBackend
-        model_name_or_path: Qwen/Qwen3-ASR-1.7B
-        revision: null
-        language: Russian
-        context: ""
-        dtype: bfloat16
-        max_inference_batch_size: 1
-        max_new_tokens: 256
-        device: ${device}
+  - _target_: audiogear.pipeline.transcribers.candidate.CandidateTranscriber
+    candidate_id_column: asr_qwen3_candidate_id
+    status_column: asr_qwen3_status
+    text_column: asr_text_qwen3
+    error_code_column: asr_qwen3_error_code
+    backend:
+      _target_: audiogear.pipeline.transcribers.qwen3.Qwen3ASRBackend
+      model_name_or_path: Qwen/Qwen3-ASR-1.7B
+      revision: 7278e1e70fe206f11671096ffdd38061171dd6e5
+      language: Russian
+      context: ""
+      dtype: bfloat16
+      max_inference_batch_size: 1
+      max_new_tokens: 256
+      device: ${device}
