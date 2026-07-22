@@ -29,15 +29,9 @@ dependencies = [
     "soundfile>=0.12",
     "librosa>=0.10.1",
     "numba>=0.59",  # avoid librosa pulling an ancient numba incompatible with py3.11/3.12
-    # ml core (models live behind metric blocks).
-    # Capped <2.6: originally forced by gigaam's torchaudio<=2.5.1 pin; gigaam
-    # 0.2 (git) dropped that pin, but 2.5.x remains what this stack is tested
-    # against — lift the cap only after revalidating pyannote/transformers.
-    # Consequence: transformers refuses to torch.load non-safetensors
-    # checkpoints (CVE-2025-32434), so transformers-based ASR backends must use
-    # safetensors.
-    "torch>=2.4,<2.6",
-    "torchaudio>=2.4,<2.6",
+    # Shared ML ABI for Python 3.12 and the official Qwen3-ASR runtime.
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
     # transformers<5 + huggingface-hub<1: pyannote.audio 3.x calls the
     # use_auth_token kwarg that huggingface-hub 1.x removed; transformers 5.x
     # requires hub 1.x. The 4.x/0.x combo keeps pyannote (brouhaha, speaker
@@ -65,6 +59,7 @@ asr = [
     "faster-whisper>=1.0",
     "jiwer>=3.0",
 ]
+qwen3 = ["qwen-asr==0.0.6"]
 # T-one (t-tech) streaming Conformer-CTC Russian ASR. PyPI `tone` is a name-squat,
 # so pull the real package from git (`--extra tone`):
 tone = ["tone @ git+https://github.com/voicekit-team/T-one.git"]
@@ -75,13 +70,18 @@ s3 = ["s3fs>=2023.12.2"]
 dev = ["ruff>=0.4", "pytest>=8.0", "moto[s3,server]"]
 # convenience: everything needed for the default Russian TTS pipeline.
 # NOTE: `uv sync --extra X` makes the venv match EXACTLY base+X and UNINSTALLS
-# every other extra. To add one extra without losing the rest, sync them all at
-# once, e.g.  uv sync --extra ru-pipeline --extra tone  (tone pulls from git).
+# every other extra. To add compatible extras without losing the rest, list
+# them together. The `tone` and `asr` extras conflict on NumPy and cannot share
+# one environment.
 ru-pipeline = [
     "audiogear[brouhaha,pitch,mos,asr,diarization,ru]",
 ]
 
 [tool.uv]
+conflicts = [
+    [{ extra = "asr" }, { extra = "tone" }],
+    [{ extra = "ru-pipeline" }, { extra = "tone" }],
+]
 # gigaam pins onnxruntime==1.17.3, but that wheel's native lib fails to load on
 # glibc 2.39 (and only torchmetrics.dnsmos imports it, which we don't use).
 # Force a working build across all extras.

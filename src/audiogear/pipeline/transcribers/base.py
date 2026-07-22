@@ -29,6 +29,15 @@ class ASRBackend(ABC):
         return (type(self).__name__, self.backend_name, self.device)
 
     @property
+    def checkpoint_identity(self) -> dict:
+        options = {
+            key: value
+            for key, value in vars(self).items()
+            if not key.startswith("_") and isinstance(value, (str, int, float, bool, type(None)))
+        }
+        return {"type": type(self).__name__, **options}
+
+    @property
     def model(self):
         # Process-global cache so the model loads once per worker, not once per
         # task (EXPERIENCE ❌5). Keeps the backend instance cheap to pickle.

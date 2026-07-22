@@ -58,6 +58,12 @@ class LocalPipelineExecutor(PipelineExecutor):
         self.local_rank_offset = local_rank_offset
         self.workers = workers if workers != -1 else self.local_tasks
         self.start_method = start_method
+        visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        self.visible_device_tokens = (
+            None
+            if visible_devices is None
+            else tuple(token.strip() for token in visible_devices.split(",") if token.strip())
+        )
         self.gpus = gpus if gpus is not None else self._detect_gpus()
 
     @staticmethod
@@ -84,10 +90,17 @@ class LocalPipelineExecutor(PipelineExecutor):
     def _pin_gpu(self, local_rank: int) -> None:
         """Pin this worker process to one GPU. Must run before any CUDA init,
         which is why model blocks load their models lazily (on first use)."""
-        if self.gpus and self.gpus > 0:
-            gpu_id = local_rank % self.gpus
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-            logger.info(f"Worker local_rank={local_rank} pinned to physical GPU {gpu_id}")
+        if not self.gpus or self.gpus <= 0:
+            return
+        if self.visible_device_tokens is not None:
+            if not self.visible_device_tokens:
+                return
+            visible_count = min(self.gpus, len(self.visible_device_tokens))
+            selected_device = self.visible_device_tokens[local_rank % visible_count]
+        else:
+            selected_device = str(local_rank % self.gpus)
+        os.environ["CUDA_VISIBLE_DEVICES"] = selected_device
+        logger.info(f"Worker local_rank={local_rank} pinned to visible GPU {selected_device}")
 
     def _launch_run_for_rank(self, rank: int, ranks_q, completed=None, completed_lock=None) -> None:
         local_rank = ranks_q.get()

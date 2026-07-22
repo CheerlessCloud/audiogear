@@ -127,6 +127,48 @@ def test_build_pipeline_predeclares_metric_columns_to_the_writer(tmp_path):
     assert steps[-1].ensure_columns == ["wada_snr"]
 
 
+def test_consensus_columns_survive_a_skipped_first_row(tmp_path):
+    from omegaconf import OmegaConf
+
+    from audiogear.build import build_pipeline
+
+    cfg = OmegaConf.create(
+        {
+            "reader": {"_target_": "audiogear.pipeline.readers.csv.CsvReader", "data_folder": str(tmp_path)},
+            "metrics": [
+                {
+                    "_target_": "audiogear.pipeline.transcribers.consensus.ConsensusTranscriber",
+                    "only_missing": True,
+                    "backends": [
+                        {"_target_": "audiogear.pipeline.transcribers.qwen3.Qwen3ASRBackend"},
+                    ],
+                }
+            ],
+            "writer": {
+                "_target_": "audiogear.pipeline.writers.csv.CsvWriter",
+                "output_folder": str(tmp_path),
+                "output_filename": "consensus.csv",
+                "sep": "|",
+            },
+            "resume": False,
+        }
+    )
+    steps = build_pipeline(cfg)
+    transcriber, writer = steps[1], steps[-1]
+    transcriber.backends[0].transcribe = lambda audio_file: "новый текст"
+    segments = [make_segment("reference", text="золотой текст"), make_segment("missing", text="")]
+    transcriber.run(segments)
+    with writer:
+        for segment in segments:
+            writer.write(segment)
+
+    rows = _read_raw(tmp_path / "consensus.csv")
+    assert rows[0]["asr_text_qwen3"] == ""
+    assert rows[1]["asr_text_qwen3"] == "новый текст"
+    assert rows[1]["asr_chosen_backend"] == "qwen3"
+    assert rows[1]["asr_agreement"] == "1.0"
+
+
 def test_unexpected_late_column_is_dropped_not_shifted(tmp_path, caplog):
     # If a later row sprouts an extra key, it must be dropped (alignment kept),
     # not silently widen that row and corrupt the file.

@@ -1,3 +1,4 @@
+import hashlib
 import math
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -62,6 +63,7 @@ class BaseMetric(PipelineStep, ABC):
         max_batch_seconds: float = 480.0,
         max_consecutive_failures: int = 50,
         checkpoint_folder=None,
+        checkpoint_identity: str | None = None,
     ):
         """
         the file writer helps save progress to disk while you compute metrics.
@@ -91,6 +93,9 @@ class BaseMetric(PipelineStep, ABC):
             already-computed clips are skipped (see ``pipeline/checkpoint.py``).
             ``None`` disables. Normally injected by ``build_pipeline``, not set in
             per-metric configs.
+        checkpoint_identity: optional model/config identity used to isolate this
+            metric's checkpoints. Existing metrics that omit it keep their legacy
+            checkpoint paths.
         """
         self.metric = metric
         self.file_writer = file_writer
@@ -102,7 +107,9 @@ class BaseMetric(PipelineStep, ABC):
         self.max_batch_seconds = max_batch_seconds
         self.max_consecutive_failures = max_consecutive_failures
         self.checkpoint_folder = checkpoint_folder
+        self.checkpoint_identity = checkpoint_identity
         self._checkpoint = None
+        self._checkpoint_fingerprints: dict[str, str] = {}
         self._failures = 0
         self._consecutive_failures = 0
 
@@ -174,9 +181,24 @@ class BaseMetric(PipelineStep, ABC):
         else:
             segment.metadata[self.metric] = results
 
+    def checkpoint_input_fingerprint(self, segment: AudioSegment) -> str | None:
+        return None
+
+    def checkpoint_result_is_resumable(self, segment: AudioSegment) -> bool:
+        return True
+
     def _write(self, segment):
-        if self._checkpoint is not None:
-            self._checkpoint.append(segment.id, {c: segment.metadata.get(c) for c in self.output_columns})
+        should_checkpoint = self._checkpoint is not None and self.checkpoint_result_is_resumable(segment)
+        if should_checkpoint:
+            segment_id = str(segment.id)
+            input_fingerprint = self._checkpoint_fingerprints.get(segment_id)
+            if input_fingerprint is None:
+                input_fingerprint = self.checkpoint_input_fingerprint(segment)
+            self._checkpoint.append(
+                segment.id,
+                {column: segment.metadata.get(column) for column in self.output_columns},
+                input_fingerprint=input_fingerprint,
+            )
         if self.file_writer:
             self.file_writer.write(segment)
 
@@ -424,20 +446,31 @@ class BaseMetric(PipelineStep, ABC):
     def _resume_from_checkpoint(self, data: AudioPipeline, rank: int) -> AudioPipeline:
         """Open the shard's checkpoint, fill cached values into their segments
         and return only the segments still left to compute."""
-        from audiogear.pipeline.checkpoint import MetricCheckpoint
+        from audiogear.pipeline.checkpoint import MetricCheckpoint, inputFingerprintField
 
         slug = f"{type(self).__name__}.{self.output_columns[0]}"
+        if self.checkpoint_identity is not None:
+            identity_hash = hashlib.sha256(self.checkpoint_identity.encode("utf-8")).hexdigest()
+            slug = f"{slug}.{identity_hash}"
         self._checkpoint = MetricCheckpoint(self.checkpoint_folder, slug, rank)
         cache = self._checkpoint.load()
         if not cache:
             return data
         todo = []
         for segment in data:
-            row = cache.get(str(segment.id))
+            segment_id = str(segment.id)
+            row = cache.get(segment_id)
+            expected_fingerprint = self.checkpoint_input_fingerprint(segment)
+            if expected_fingerprint is not None:
+                self._checkpoint_fingerprints[segment_id] = expected_fingerprint
             if row is None:
                 todo.append(segment)
-            else:
-                segment.metadata.update(row)
+                continue
+            stored_fingerprint = row.pop(inputFingerprintField, None)
+            if expected_fingerprint is not None and stored_fingerprint != expected_fingerprint:
+                todo.append(segment)
+                continue
+            segment.metadata.update(row)
         logger.info(
             f"{self.metric}: resumed {len(data) - len(todo)} clip(s) from checkpoint, "
             f"{len(todo)} left to compute"
@@ -451,6 +484,7 @@ class BaseMetric(PipelineStep, ABC):
 
         self._failures = 0
         self._consecutive_failures = 0
+        self._checkpoint_fingerprints = {}
 
         # ``todo`` is what still needs computing this run; ``data`` (returned as
         # is) keeps every segment, including ones restored from the checkpoint.

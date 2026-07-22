@@ -6,6 +6,7 @@ from audiogear.pipeline.transcribers.backends import (
 )
 from audiogear.pipeline.transcribers.base import ASRBackend
 from audiogear.pipeline.transcribers.consensus import ConsensusTranscriber
+from audiogear.pipeline.transcribers.qwen3 import Qwen3ASRBackend
 
 __all__ = [
     "ASRBackend",
@@ -14,4 +15,5 @@ __all__ = [
     "WhisperBackend",
     "Wav2Vec2Backend",
     "ToneBackend",
+    "Qwen3ASRBackend",
 ]

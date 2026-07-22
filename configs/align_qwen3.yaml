@@ -1,0 +1,40 @@
+defaults:
+  - reader: ru
+  - writer: csv
+  - executor: local
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+device: cuda
+
+reader:
+  data_folder: ${oc.env:AUDIOGEAR_DATA_DIR,data/your_dataset}
+  limit: -1
+
+writer:
+  output_folder: outputs
+  output_filename: qwen3_aligned_$rank.csv
+  sep: "|"
+
+executor:
+  tasks: 1
+  workers: 1
+  gpus: 1
+  skip_completed: false
+  logging_dir: logs/qwen3_alignment
+
+metrics:
+  - _target_: audiogear.pipeline.metrics.qwen3_alignment.Qwen3ForcedAlignmentMetric
+    model_name_or_path: Qwen/Qwen3-ForcedAligner-0.6B
+    revision: null
+    language: Russian
+    dtype: bfloat16
+    device: ${device}
+    batch_size: 1
+    max_batch_seconds: 300.0

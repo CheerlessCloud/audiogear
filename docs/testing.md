@@ -11,7 +11,52 @@ It targets the plumbing where data silently corrupts: CSV writer/reader
 round-trips and column alignment, result↔segment pairing across **every**
 scheduling path (batched / prefetch / plain-GPU / parallel-CPU), the runtime
 helpers (length bucketing, windowing, OOM detection), and text normalization. No
-weights are downloaded, so it runs in a couple of seconds.
+weights are downloaded, so it runs in a couple of seconds. Qwen tests mock the
+optional package and don't download model weights.
+
+## Qwen3 RTX 3060 smoke
+
+Install the dedicated extra in the Python 3.12, Torch 2.8 runtime and validate
+both presets before model execution:
+
+```bash
+uv sync --python 3.12 --extra dev --extra qwen3
+uv pip check
+uv run python process.py --config-name annotate_qwen3 --cfg job
+uv run python process.py --config-name align_qwen3 --cfg job
+```
+
+Run ASR and alignment separately on a 12 GB card. Keep
+`executor.workers=1`, `executor.gpus=1`, BF16, and batch size 1. Don't combine
+ASR, alignment, or diarization in one invocation because worker-process model
+caches retain GPU models until exit.
+
+```bash
+uv run python process.py --config-name annotate_qwen3 reader.limit=10
+uv run python process.py --config-name align_qwen3 reader.limit=10
+uv run python process.py --config-name annotate_qwen3 reader.limit=10 \
+  metrics.0.backends.0.model_name_or_path=Qwen/Qwen3-ASR-0.6B
+```
+
+The established RTX 3060 baseline used Python 3.12, torch 2.8.0+cu128,
+transformers 4.57.6, and qwen-asr 0.0.6. `Qwen/Qwen3-ASR-1.7B` BF16 reserved
+about 4492 MiB and returned `сделать заказ с доставкой.`;
+`Qwen/Qwen3-ForcedAligner-0.6B` reserved about 1810 MiB.
+
+For ASR, verify ordered one-result-per-input mapping, nonempty Russian speech,
+`asr_text_qwen3`/chosen/agreement columns, and byte-for-byte preservation of every
+nonempty reference in `text`. Both presets disable rank-only completion skipping
+and use separate logging directories; kill/restart validation must show that the
+config- and audio-aware per-clip checkpoints resume work instead. For alignment,
+include empty text,
+Russian punctuation, a corrupt clip, and a partial-checkpoint restart. Parse
+every `qwen3_alignment` cell with `json.loads`, require statuses `ok`,
+`empty_text`, or `error`, and verify finite monotonic word spans. The alignment
+text must be the existing CSV `text`; Qwen hypothesis timestamps must never
+replace it. Change the model/revision, audio bytes, reference text, and
+CPU/CUDA device between restarts and verify each incompatible row is recomputed.
+When testing a pinned Hub revision, confirm qwen-asr receives a local snapshot
+path and no `revision` keyword.
 
 ## End-to-end run on a small subset (2× RTX 4090)
 

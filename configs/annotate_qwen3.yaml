@@ -1,0 +1,47 @@
+defaults:
+  - reader: ru
+  - writer: csv
+  - executor: local
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+device: cuda
+
+reader:
+  data_folder: ${oc.env:AUDIOGEAR_DATA_DIR,data/your_dataset}
+  limit: -1
+
+writer:
+  output_folder: outputs
+  output_filename: qwen3_annotated_$rank.csv
+  sep: "|"
+
+executor:
+  tasks: 1
+  workers: 1
+  gpus: 1
+  skip_completed: false
+  logging_dir: logs/qwen3_annotation
+
+metrics:
+  - _target_: audiogear.pipeline.transcribers.consensus.ConsensusTranscriber
+    only_missing: false
+    overwrite_text: false
+    prefer_punctuated: true
+    max_consecutive_failures: 10
+    backends:
+      - _target_: audiogear.pipeline.transcribers.qwen3.Qwen3ASRBackend
+        model_name_or_path: Qwen/Qwen3-ASR-1.7B
+        revision: null
+        language: Russian
+        context: ""
+        dtype: bfloat16
+        max_inference_batch_size: 1
+        max_new_tokens: 256
+        device: ${device}

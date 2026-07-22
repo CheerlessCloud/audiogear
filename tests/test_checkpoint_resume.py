@@ -25,8 +25,12 @@ def _segments(n):
 
 
 class _CountingMetric(BaseMetric):
-    def __init__(self, folder, fail_ids=frozenset()):
-        super().__init__(metric="val", checkpoint_folder=str(folder))
+    def __init__(self, folder, fail_ids=frozenset(), checkpoint_identity=None):
+        super().__init__(
+            metric="val",
+            checkpoint_folder=str(folder),
+            checkpoint_identity=checkpoint_identity,
+        )
         self.calls = 0
         self.fail_ids = fail_ids
 
@@ -35,6 +39,11 @@ class _CountingMetric(BaseMetric):
         if segment.id in self.fail_ids:
             raise ValueError("corrupt clip")
         return segment.metadata["x"] * 1.5  # non-integer: types must survive
+
+
+class _InputAwareMetric(_CountingMetric):
+    def checkpoint_input_fingerprint(self, segment):
+        return f"x={segment.metadata['x']}"
 
 
 def _ckpt_path(folder):
@@ -85,6 +94,38 @@ def test_torn_checkpoint_line_is_skipped_and_recomputed(tmp_path):
     assert segs[9].metadata["val"] == 9 * 1.5
 
 
+def test_optional_input_fingerprint_recomputes_changed_segment_without_leaking_metadata(tmp_path):
+    first_segment = _segments(1)[0]
+    _InputAwareMetric(tmp_path).run([first_segment])
+
+    changed_segment = _segments(1)[0]
+    changed_segment.metadata["x"] = 10
+    metric = _InputAwareMetric(tmp_path)
+    metric.run([changed_segment])
+
+    assert metric.calls == 1
+    assert changed_segment.metadata["val"] == 15.0
+    assert "_audiogear_input_fingerprint" not in changed_segment.metadata
+    checkpoint_path = next(tmp_path.glob("_InputAwareMetric.val/*.jsonl"))
+    rows = [json.loads(line) for line in checkpoint_path.read_text().splitlines()]
+    assert rows[-1]["_audiogear_input_fingerprint"] == "x=10"
+
+
+def test_config_aware_checkpoint_does_not_change_legacy_paths(tmp_path):
+    _CountingMetric(tmp_path).run(_segments(1))
+    legacy_path = _ckpt_path(tmp_path)
+
+    first = _CountingMetric(tmp_path, checkpoint_identity="model=0.6B;revision=a")
+    first.run(_segments(1))
+    second = _CountingMetric(tmp_path, checkpoint_identity="model=0.6B;revision=b")
+    second.run(_segments(1))
+
+    assert os.path.isfile(legacy_path)
+    identity_paths = sorted(tmp_path.glob("_CountingMetric.val.*/*.jsonl"))
+    assert len(identity_paths) == 2
+    assert identity_paths[0].parent != identity_paths[1].parent
+
+
 def test_checkpoint_lines_are_flushed_per_clip(tmp_path):
     # A hard kill must lose at most the line being written: after run() every
     # clip is on disk, one JSON object per line.
@@ -111,6 +152,24 @@ def test_build_pipeline_attaches_checkpoints_by_default(tmp_path):
     from audiogear.build import build_pipeline
 
     steps = build_pipeline(_cfg(tmp_path))
+    assert steps[1].checkpoint_folder == os.path.join(str(tmp_path), "checkpoints")
+
+
+def test_build_pipeline_attaches_checkpoints_to_capable_transcriber(tmp_path):
+    from audiogear.build import build_pipeline
+
+    cfg = _cfg(tmp_path)
+    cfg.metrics = [
+        {
+            "_target_": "audiogear.pipeline.transcribers.consensus.ConsensusTranscriber",
+            "backends": [
+                {"_target_": "audiogear.pipeline.transcribers.qwen3.Qwen3ASRBackend"}
+            ],
+        }
+    ]
+
+    steps = build_pipeline(cfg)
+
     assert steps[1].checkpoint_folder == os.path.join(str(tmp_path), "checkpoints")
 
 

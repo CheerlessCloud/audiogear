@@ -25,6 +25,7 @@ multi-node cluster, and is managed with [uv](https://docs.astral.sh/uv/).
 cd audiogear
 uv sync                       # core (torch, hydra, the framework)
 uv sync --extra ru-pipeline   # everything for the Russian TTS pipeline below
+uv sync --extra qwen3         # official qwen-asr==0.0.6 ASR + forced alignment
 # or pick à-la-carte extras: --extra mos --extra asr --extra pitch --extra brouhaha ...
 cp .env.example .env          # then put your HF_TOKEN in .env (gated models)
 ```
@@ -80,6 +81,7 @@ Backends (in `configs/annotate.yaml`), all Russian-capable and open:
 | **GigaAM** | `GigaAMBackend` | `asr` extra | pip ships v2 (`v2_rnnt`); v3 (`ai-sage/GigaAM-v3`) is manual |
 | **Whisper** | `WhisperBackend` | `asr` extra | faster-whisper `large-v3` |
 | **T-one** | `ToneBackend` | `uv pip install "tone @ git+https://github.com/voicekit-team/T-one.git"` | t-tech streaming Conformer-CTC |
+| **Qwen3-ASR** | `Qwen3ASRBackend` | `qwen3` extra | official Transformers API; default `Qwen/Qwen3-ASR-1.7B` |
 
 GigaAM + Whisper are active by default; uncomment T-one in
 `configs/annotate.yaml` once installed. Add another model by subclassing
@@ -95,6 +97,56 @@ Example output (10 `rootreck_fallout4` clips, GigaAM-v2 + Whisper-large-v3):
    whisper: Охренеть! Прыгать оттуда очень тупо.
    -> CHOSEN (gigaam, agree=1.0): охренеть прыгать оттуда очень тупо
 ```
+
+### Qwen3 ASR and reference alignment
+
+The standalone RTX 3060 presets use one worker and one logical GPU:
+
+```bash
+uv sync --extra dev --extra qwen3
+uv run python process.py --config-name annotate_qwen3
+uv run python process.py --config-name align_qwen3
+```
+
+`annotate_qwen3` uses `Qwen3ASRBackend` with `Qwen/Qwen3-ASR-1.7B`, Russian,
+BF16, inference batch size 1, and `max_new_tokens=256`. Other backend defaults
+are an unset `revision`, empty `context`, name `qwen3`, and device `cuda`
+(resolved to logical `cuda:0` after worker pinning). It processes every row,
+writes `asr_text_qwen3`, and preserves the existing `text` reference exactly.
+It calls the official `Qwen3ASRModel.from_pretrained(...).transcribe(...)`
+Transformers wrapper. Use
+the 0.6B ASR with only this Hydra override:
+
+```bash
+uv run python process.py --config-name annotate_qwen3 \
+  metrics.0.backends.0.model_name_or_path=Qwen/Qwen3-ASR-0.6B
+```
+
+`align_qwen3` doesn't transcribe and never overwrites `text`. It sends the
+existing reference text directly to `Qwen3ForcedAligner.align(audio, text,
+language)` using `Qwen/Qwen3-ForcedAligner-0.6B`. Its defaults are Russian,
+BF16 CUDA (FP32 for CPU fallback), batch size 1, and an unset revision. When a
+revision is set, audiogear resolves it lazily with `snapshot_download` and gives
+the official qwen-asr wrapper one local snapshot path, pinning both model and
+processor despite qwen-asr 0.0.6 not forwarding `revision` to `AutoProcessor`.
+Qwen ASR hypothesis timestamps aren't reference alignment and aren't used by
+this metric.
+
+Alignment adds two columns:
+
+- `qwen3_alignment`: compact UTF-8 JSON
+  `[{"text":"слово","start":0.0,"end":0.42}]`, with seconds rounded to three
+  decimals. Empty/error rows contain the valid JSON value `[]`.
+- `qwen3_alignment_status`: `ok`, `empty_text`, or `error`.
+
+On a 12 GB GPU, run Qwen ASR and forced alignment as separate process
+invocations. Don't add both blocks to one config: models are cached for the
+worker lifetime and concurrent residency wastes VRAM. The supported production
+default is `executor.workers=1`, `executor.gpus=1`, BF16, batch size 1. The same
+policy applies to diarization: run ASR, alignment, and diarization separately.
+Measured RTX 3060 evidence with Python 3.12, Torch 2.8.0+cu128, Transformers
+4.57.6, and qwen-asr 0.0.6 was about 4492 MiB reserved for 1.7B ASR and 1810 MiB
+reserved for the 0.6B aligner.
 
 ### Punctuation
 
@@ -199,7 +251,8 @@ Each block is a `PipelineStep`; metric blocks add columns to each clip's metadat
 | Emotion | `EmotionMetric` | `emotion_pred`, `emotion_score` | RU DUSHA HuBERT | core |
 | Accent (EN) | `AccentMetric` | `accent` | SpeechBrain ECAPA | (speechbrain) |
 | HF model (any) | `HFAudioModelMetric` | configurable | 🤗 audio model (classification/regression) | core |
-| Consensus ASR | `ConsensusTranscriber` | `text`, `asr_text_*`, `asr_agreement` | GigaAM+Whisper+T-one+wav2vec2 | `asr` / `tone` |
+| Consensus ASR | `ConsensusTranscriber` | `text`, `asr_text_*`, `asr_chosen_backend`, `asr_agreement`, optional `asr_low_confidence` | GigaAM+Whisper+T-one+Qwen3 | `asr` / `tone` / `qwen3` |
+| Qwen3 reference alignment | `Qwen3ForcedAlignmentMetric` | `qwen3_alignment`, `qwen3_alignment_status` | `Qwen/Qwen3-ForcedAligner-0.6B` | `qwen3` |
 | Speaker labeling | `SpeakerLabeler` | `speaker`, `speaker_conf`, `speaker_margin` | pyannote embed + clustering | `diarization` |
 | Diarization | `DiarizationMetric` | `num_speakers`, `top_speaker_ratio` | pyannote 3.1 (gated) | `diarization` |
 
@@ -263,8 +316,13 @@ brouhaha, diarization, accent are config-gated.
   `<output_folder>/checkpoints/`; a rerun after a crash resumes an unfinished
   shard from the last computed clip instead of recomputing hours of GPU work.
   On by default (`resume: false` disables, `checkpoint_dir` relocates).
-  Checkpoints are keyed by clip id only — delete the `checkpoints/` folder when
-  you change a metric's model or parameters.
+  Checkpoints are keyed by clip id. Qwen annotation and forced alignment include
+  all backend/config options in their checkpoint identity and validate the full
+  audio content before restoring a row; alignment also validates the exact
+  reference text and effective device/dtype. Legacy metrics retain their existing
+  rows and paths. The Qwen presets use isolated logging directories and disable
+  rank-only completion skipping, so these input-aware per-clip checkpoints own
+  resume after model or revision changes.
 
 ## Execution modes (1 → N machines, 1 → N GPUs)
 

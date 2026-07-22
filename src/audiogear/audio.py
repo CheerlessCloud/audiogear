@@ -55,7 +55,6 @@ def load_audio(
         # torchaudio's ffmpeg backend chokes on some valid files (e.g. MP3s whose
         # default_audio_stream is None -> get_src_stream_info(None)); soundfile
         # (libsndfile) reads them fine. Fall back so one odd file doesn't kill a shard.
-        import numpy as np
         import soundfile as sf
 
         data, sr = sf.read(path, dtype="float32", always_2d=True)  # (frames, channels)

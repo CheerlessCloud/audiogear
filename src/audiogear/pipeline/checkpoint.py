@@ -18,19 +18,31 @@ each metric owns its own file, and all appends happen on the metric's main
 thread. Rank-safe: one file per rank, and ranks never share a process
 concurrently.
 
-Staleness: rows are keyed by clip id and the slug only encodes the metric class
-and its first output column — changing a metric's *parameters* (model, backend,
-thresholds) does not invalidate them. Delete the ``checkpoints/`` folder when
-re-running with a changed metric config.
+Staleness: rows are keyed by clip id. Legacy metric slugs encode the metric
+class and first output column, while model-sensitive metrics may append a
+configuration identity hash and an internal per-row input fingerprint. Legacy
+rows and paths remain readable.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 
+from fsspec import open as fsspec_open
 from loguru import logger
 
 from audiogear.io import DataFolderLike, get_datafolder
+
+inputFingerprintField = "_audiogear_input_fingerprint"
+
+
+def fingerprint_audio_file(audio_file: str) -> str:
+    digest = hashlib.sha256()
+    with fsspec_open(audio_file, "rb") as audio:
+        while chunk := audio.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class MetricCheckpoint:
@@ -62,12 +74,15 @@ class MetricCheckpoint:
             logger.warning(f"checkpoint {self.path}: skipped {skipped} corrupt line(s)")
         return cache
 
-    def append(self, segment_id, values: dict) -> None:
+    def append(self, segment_id, values: dict, input_fingerprint: str | None = None) -> None:
         if self._handle is None:
             self._handle = self.data_folder.open(self.path, "at")
+        row = {"id": segment_id, **values}
+        if input_fingerprint is not None:
+            row[inputFingerprintField] = input_fingerprint
         # default=str: numpy scalars and other exotica degrade to strings rather
         # than fail; allow_nan (default) keeps the guard's NaN sentinels intact.
-        self._handle.write(json.dumps({"id": segment_id, **values}, ensure_ascii=False, default=str) + "\n")
+        self._handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         self._handle.flush()  # a crash may lose at most the line being written
 
     def close(self) -> None:

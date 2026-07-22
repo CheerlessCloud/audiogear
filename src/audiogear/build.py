@@ -20,15 +20,13 @@ from audiogear.pipeline.base import PipelineStep
 from audiogear.pipeline.metrics.base import BaseMetric
 
 
-def _metric_steps(steps):
-    """Yield every BaseMetric in the pipeline, descending into lanes."""
+def _checkpoint_steps(steps):
+    """Yield checkpoint-capable steps in the pipeline, descending into lanes."""
     for step in steps:
-        if isinstance(step, BaseMetric):
+        if isinstance(step, BaseMetric) or getattr(step, "checkpoint_capable", False):
             yield step
         for lane in getattr(step, "lanes", None) or []:
-            for sub in lane:
-                if isinstance(sub, BaseMetric):
-                    yield sub
+            yield from _checkpoint_steps(lane)
 
 
 def build_pipeline(cfg: DictConfig) -> list[PipelineStep]:
@@ -53,9 +51,9 @@ def build_pipeline(cfg: DictConfig) -> list[PipelineStep]:
         if not checkpoint_dir and getattr(writer, "output_folder", None) is not None:
             checkpoint_dir = os.path.join(str(writer.output_folder.path), "checkpoints")
         if checkpoint_dir:
-            for metric_step in _metric_steps(steps):
-                if metric_step.checkpoint_folder is None:
-                    metric_step.checkpoint_folder = checkpoint_dir
+            for checkpoint_step in _checkpoint_steps(steps):
+                if checkpoint_step.checkpoint_folder is None:
+                    checkpoint_step.checkpoint_folder = checkpoint_dir
     steps.append(writer)
     return steps
 
