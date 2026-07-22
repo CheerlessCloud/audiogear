@@ -97,11 +97,11 @@ def test_all_empty_batch_never_loads_or_invokes_model():
     assert results == [("[]", "empty_text"), ("[]", "empty_text")]
 
 
-def test_json_is_compact_utf8_and_preserves_timestamps():
+def test_json_is_compact_utf8_and_preserves_interpolated_off_grid_timestamps():
     metric = Qwen3ForcedAlignmentMetric()
-    serialized = metric._serialize_result(_result(_word('ёлка, | "дом"', 0.0001, 1.23456)))
+    serialized = metric._serialize_result(_result(_word('ёлка, | "дом"', 2.98, 3.48)))
 
-    assert serialized == '[{"text":"ёлка, | \\"дом\\"","start":0.0001,"end":1.23456}]'
+    assert serialized == '[{"text":"ёлка, | \\"дом\\"","start":2.98,"end":3.48}]'
     assert json.loads(serialized)[0]["text"] == 'ёлка, | "дом"'
 
 
@@ -227,14 +227,18 @@ def test_checkpoint_identity_covers_model_revision_language_dtype_and_columns():
     cpu_identity = json.loads(Qwen3ForcedAlignmentMetric(device="cpu").checkpoint_identity)
     assert cpu_identity["device"] == "cpu"
     assert cpu_identity["effective_dtype"] == "float32"
-    assert cpu_identity["timestamp_quantum_ms"] == 80
+    assert cpu_identity["timestamp_segment_ms"] == 80
     assert cpu_identity["endpoint_tolerance_ms"] == 80
     assert cpu_identity["status_mapping_version"] == "2.0.0"
 
 
-def test_checkpoint_identity_changes_with_tolerance_and_status_mapping_version(monkeypatch):
+def test_checkpoint_identity_changes_with_timestamp_segment_tolerance_and_status_mapping_version(monkeypatch):
     baseline = Qwen3ForcedAlignmentMetric().checkpoint_identity
 
+    monkeypatch.setattr(Qwen3ForcedAlignmentMetric, "timestampSegmentMs", 81)
+    changed_timestamp_segment = Qwen3ForcedAlignmentMetric().checkpoint_identity
+
+    monkeypatch.setattr(Qwen3ForcedAlignmentMetric, "timestampSegmentMs", 80)
     monkeypatch.setattr(Qwen3ForcedAlignmentMetric, "endpointToleranceMs", 81)
     changed_tolerance = Qwen3ForcedAlignmentMetric().checkpoint_identity
 
@@ -242,6 +246,7 @@ def test_checkpoint_identity_changes_with_tolerance_and_status_mapping_version(m
     monkeypatch.setattr(Qwen3ForcedAlignmentMetric, "statusMappingVersion", "2.0.1")
     changed_mapping = Qwen3ForcedAlignmentMetric().checkpoint_identity
 
+    assert changed_timestamp_segment != baseline
     assert changed_tolerance != baseline
     assert changed_mapping != baseline
 

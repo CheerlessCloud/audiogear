@@ -54,7 +54,10 @@ every `qwen3_alignment` cell with `json.loads`, require statuses `ok`,
 `out_of_bounds`, `empty_text`, or `error`, and verify nonempty, nonblank, finite
 monotonic word spans. Classify the final endpoint against the WAV header with an
 inclusive 80 ms frame tolerance; retain all words and timestamps for
-`out_of_bounds`. The alignment text must be the existing CSV `text`; Qwen
+`out_of_bounds`. Treat 80 ms as the model's timestamp segment size, not an
+output timestamp quantum: official `fix_timestamp` can interpolate timestamps,
+so returned values don't have to lie on an 80 ms grid. The alignment text must
+be the existing CSV `text`; Qwen
 hypothesis timestamps must never replace it. Change the model/revision, audio
 bytes, reference text, and CPU/CUDA device between restarts and verify each
 incompatible row is recomputed.

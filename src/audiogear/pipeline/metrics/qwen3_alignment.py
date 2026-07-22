@@ -18,7 +18,7 @@ class Qwen3ForcedAlignmentMetric(BaseMetric):
     name = "⏱ Qwen3 Forced Alignment"
     gpu = True
     supports_batch = True
-    timestampQuantumMs = 80
+    timestampSegmentMs = 80
     endpointToleranceMs = 80
     statusMappingVersion = "2.0.0"
 
@@ -54,7 +54,7 @@ class Qwen3ForcedAlignmentMetric(BaseMetric):
                 "batch_size": batch_size,
                 "max_batch_seconds": max_batch_seconds,
                 "output_columns": output_columns,
-                "timestamp_quantum_ms": self.timestampQuantumMs,
+                "timestamp_segment_ms": self.timestampSegmentMs,
                 "endpoint_tolerance_ms": self.endpointToleranceMs,
                 "status_mapping_version": self.statusMappingVersion,
             },

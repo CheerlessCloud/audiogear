@@ -138,6 +138,9 @@ Alignment adds two columns:
 - `qwen3_alignment`: compact UTF-8 JSON
   `[{"text":"слово","start":0.0,"end":0.42}]`. Successful rows preserve every
   model word and timestamp; empty/error rows contain the valid JSON value `[]`.
+  The model's `timestamp_segment_time` is 80 ms, but the official
+  `fix_timestamp` can interpolate returned timestamps between segments. Output
+  timestamps aren't required to lie on an 80 ms grid.
 - `qwen3_alignment_status`: `ok` when the final endpoint is within the inclusive
   80 ms WAV-header tolerance, `out_of_bounds` when it exceeds that tolerance,
   `empty_text` for blank producer input, or `error` for malformed/failed output.
