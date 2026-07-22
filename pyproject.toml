@@ -89,10 +89,8 @@ conflicts = [
     [{ extra = "asr" }, { extra = "tone" }],
     [{ extra = "ru-pipeline" }, { extra = "tone" }],
 ]
-# gigaam pins onnxruntime==1.17.3, but that wheel's native lib fails to load on
-# glibc 2.39 (and only torchmetrics.dnsmos imports it, which we don't use).
-# Force a working build across all extras.
-override-dependencies = ["onnxruntime>=1.19"]
+# Keep one ONNX Runtime build compatible with both current GigaAM and T-one.
+override-dependencies = ["onnxruntime==1.23.*"]
 
 [build-system]
 requires = ["setuptools>=68"]
