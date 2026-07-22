@@ -58,6 +58,39 @@ CPU/CUDA device between restarts and verify each incompatible row is recomputed.
 When testing a pinned Hub revision, confirm qwen-asr receives a local snapshot
 path and no `revision` keyword.
 
+## Senko RTX 3060 smoke
+
+Resolve the portable Senko extra on Python 3.12 and compose the standalone
+preset before inference:
+
+```bash
+uv sync --python 3.12 --extra dev --extra senko
+uv pip check
+uv run python process.py --config-name diarize_senko --cfg job
+```
+
+Senko is pinned to `ba0e12ed923ff49e8c2d9d9a3e42d7923cb95724`. Keep the
+verified settings: one worker, one logical `cuda:0`, Silero VAD, CPU clustering,
+`warmup=false`, and `accurate=false`. CPU clustering deliberately avoids RAPIDS
+and its large NVIDIA dependency set. A short-clip remote smoke reserved about
+46 MiB of GPU memory.
+
+Run Senko in its own process on the 12 GB card. Cover silence, one and two
+speakers, 48 kHz stereo, short turns, overlap, a corrupt file, and audio at or
+above 20 minutes. Parse all three JSON columns, require `ok`, `no_speech`, or
+`error`, and verify every span is finite with `0 <= start < end` before output
+rounding. Speaker labels are file-local, merged turns filter speech at or below
+0.78 seconds and merge same-speaker gaps up to four seconds, and overlap isn't
+represented. Repeat the long CPU-clustering case to measure upstream
+nondeterminism.
+
+Kill and restart after several rows, then change a config option and the audio
+bytes. Valid rows must resume, changed rows must recompute, and `error` rows must
+be retried. The file API isn't a valid smoke path: it crashes in torchaudio Sox
+effects, and importing Senko changes torchaudio's process-global backend so even
+audiogear's usual loader can crash. Confirm the metric uses soundfile plus SciPy
+resampling before lazy Senko import and calls only `diarize_samples`.
+
 ## End-to-end run on a small subset (2× RTX 4090)
 
 A self-contained smoke test on 12 synthetic clips (varying length / sample rate,

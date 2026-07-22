@@ -123,3 +123,40 @@ def test_qwen_configs_instantiate_without_loading_optional_package():
 
     assert transcriber.backends[0].model_name_or_path == "Qwen/Qwen3-ASR-1.7B"
     assert alignment.model_name_or_path == "Qwen/Qwen3-ForcedAligner-0.6B"
+
+
+def test_senko_preset_composes_with_verified_rtx_3060_defaults():
+    config = _compose("diarize_senko")
+    metric = config.metrics[0]
+
+    assert metric._target_ == "audiogear.pipeline.metrics.senko.SenkoDiarizationMetric"
+    assert metric.device == "cuda"
+    assert metric.vad == "silero"
+    assert metric.clustering == "cpu"
+    assert metric.warmup is False
+    assert metric.accurate is False
+    assert metric.sample_rate == 16000
+    assert config.executor.tasks == 1
+    assert config.executor.workers == 1
+    assert config.executor.gpus == 1
+    assert config.executor.skip_completed is False
+    assert config.executor.logging_dir == "logs/senko_diarization"
+    assert config.executor.logging_dir not in {
+        _compose("annotate_qwen3").executor.logging_dir,
+        _compose("align_qwen3").executor.logging_dir,
+    }
+
+
+def test_senko_config_instantiates_without_loading_optional_package():
+    config = _compose("diarize_senko")
+
+    metric = instantiate(config.metrics[0])
+
+    assert metric.device == "cuda"
+    assert metric.output_columns == (
+        "senko_segments",
+        "senko_raw_segments",
+        "senko_num_speakers",
+        "senko_timing",
+        "senko_status",
+    )

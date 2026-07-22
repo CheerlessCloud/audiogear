@@ -1,0 +1,14 @@
+_target_: audiogear.pipeline.metrics.senko.SenkoDiarizationMetric
+device: ${device}
+vad: silero
+clustering: cpu
+warmup: false
+accurate: false
+mer_cos: null
+sample_rate: 16000
+segments_column: senko_segments
+raw_segments_column: senko_raw_segments
+num_speakers_column: senko_num_speakers
+timing_column: senko_timing
+status_column: senko_status
+max_consecutive_failures: 50

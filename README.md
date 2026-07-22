@@ -26,6 +26,7 @@ cd audiogear
 uv sync                       # core (torch, hydra, the framework)
 uv sync --extra ru-pipeline   # everything for the Russian TTS pipeline below
 uv sync --extra qwen3         # official qwen-asr==0.0.6 ASR + forced alignment
+uv sync --extra senko         # Senko pinned to ba0e12ed923ff49e8c2d9d9a3e42d7923cb95724
 # or pick à-la-carte extras: --extra mos --extra asr --extra pitch --extra brouhaha ...
 cp .env.example .env          # then put your HF_TOKEN in .env (gated models)
 ```
@@ -148,6 +149,50 @@ Measured RTX 3060 evidence with Python 3.12, Torch 2.8.0+cu128, Transformers
 4.57.6, and qwen-asr 0.0.6 was about 4492 MiB reserved for 1.7B ASR and 1810 MiB
 reserved for the 0.6B aligner.
 
+### Senko diarization
+
+The `senko` extra pins official Senko to Git commit
+`ba0e12ed923ff49e8c2d9d9a3e42d7923cb95724`. Run its standalone preset in a
+separate process:
+
+```bash
+uv sync --extra dev --extra senko
+uv run python process.py --config-name diarize_senko
+```
+
+The verified RTX 3060 settings are `device=cuda`, Silero VAD, CPU clustering,
+`warmup=false`, and deterministic explicit `accurate=false`. CPU clustering is
+intentional: the supported extra doesn't install RAPIDS or the other large
+NVIDIA add-ons. This path used about 46 MiB reserved GPU memory on a short clip.
+The preset has one worker, one logical GPU, isolated logs, rank skipping
+disabled, and config/full-audio-aware checkpoint resume. Run Senko separately
+from Qwen ASR and alignment on a 12 GB card so process caches never retain the
+models together.
+
+Senko adds five fixed columns:
+
+- `senko_segments`: compact JSON merged turns.
+- `senko_raw_segments`: compact JSON turns before upstream merge/filter cleanup.
+- `senko_num_speakers`: merged speaker count.
+- `senko_timing`: compact JSON timing statistics.
+- `senko_status`: `ok`, `no_speech`, or `error`.
+
+No-speech and error rows both keep valid structured values (`[]`, `[]`, `0`,
+`{}`), with status distinguishing them. Centroids, colors, and VAD internals
+aren't stored. Speaker labels such as `SPEAKER_01` are scoped to one file and
+mustn't be used as cross-file identities. Senko doesn't represent overlapping
+speakers. Its merged output removes turns at or below 0.78 seconds and merges
+same-speaker gaps up to four seconds, so use `senko_raw_segments` when that
+presentation cleanup is unsuitable.
+
+Senko's file API crashes in torchaudio Sox effects on the verified host.
+Importing Senko also changes torchaudio's process-global backend, after which
+ordinary torchaudio decode can crash before Python can catch an exception. The
+metric therefore never imports or calls torchaudio: it decodes with soundfile,
+downmixes, resamples with SciPy to contiguous mono float32 at 16 kHz, then calls
+public `diarize_samples(..., generate_colors=False)`. Keep this workaround even
+when prefetching or when Senko was initialized earlier in the worker.
+
 ### Punctuation
 
 ASR backends differ in punctuation: GigaAM-v2 emits lowercase/unpunctuated text,
@@ -253,6 +298,7 @@ Each block is a `PipelineStep`; metric blocks add columns to each clip's metadat
 | HF model (any) | `HFAudioModelMetric` | configurable | 🤗 audio model (classification/regression) | core |
 | Consensus ASR | `ConsensusTranscriber` | `text`, `asr_text_*`, `asr_chosen_backend`, `asr_agreement`, optional `asr_low_confidence` | GigaAM+Whisper+T-one+Qwen3 | `asr` / `tone` / `qwen3` |
 | Qwen3 reference alignment | `Qwen3ForcedAlignmentMetric` | `qwen3_alignment`, `qwen3_alignment_status` | `Qwen/Qwen3-ForcedAligner-0.6B` | `qwen3` |
+| Senko diarization | `SenkoDiarizationMetric` | `senko_segments`, `senko_raw_segments`, `senko_num_speakers`, `senko_timing`, `senko_status` | pinned Senko, CUDA embeddings + Silero VAD + CPU clustering | `senko` |
 | Speaker labeling | `SpeakerLabeler` | `speaker`, `speaker_conf`, `speaker_margin` | pyannote embed + clustering | `diarization` |
 | Diarization | `DiarizationMetric` | `num_speakers`, `top_speaker_ratio` | pyannote 3.1 (gated) | `diarization` |
 
@@ -375,9 +421,9 @@ remote URLs (`s3://…`, `gcs://…`, `az://…`). Install the backend (`s3fs` f
 uv sync --extra ru-pipeline --extra s3      # add s3fs (sync all extras together)
 ```
 
-> **Audio is decoded locally.** Audio files are read with torchaudio's local
-> loader, which does **not** speak `s3://`. So the *audio* must live on a
-> locally-readable filesystem — local disk, or a bucket mounted via FUSE
+> **Audio is decoded locally.** Most blocks use torchaudio's local loader;
+> Senko uses soundfile to avoid the Sox crash. Neither path speaks `s3://`, so
+> the *audio* must live on a locally-readable filesystem, either local disk or a bucket mounted via FUSE
 > (`geesefs` / `goofys` / `s3fs-fuse`). The natural split is: **audio local (or
 > FUSE-mounted), outputs + logs streamed to S3.** If you FUSE-mount the bucket,
 > point `reader.data_folder` at the mount and everything (incl. audio) is "local".
@@ -601,7 +647,7 @@ audiogear/
   SKILL.md                   # agent skill: drive audiogear from another project
   configs/                   # Hydra configs (config.yaml, resd.yaml, reader/ writer/ executor/ metric/)
   src/audiogear/
-    audio.py                 # shared load/resample
+    audio.py                 # shared torchaudio load/resample (Senko bypasses it)
     data.py                  # AudioSegment / AudioPipeline
     build.py                 # Hydra builder (instantiate -> pipeline -> executor, checkpoint wiring)
     pipeline/
@@ -622,11 +668,12 @@ audiogear/
 ## Notes on dependency pins
 `gigaam` installs **from git, pinned to a commit** (PyPI is stuck at 0.1.0,
 v2-era: no v3/e2e or multilingual models and a hard `torchaudio<=2.5.1` pin).
-gigaam 0.2 dropped that pin, but torch stays capped `<2.6` — it is what this
-stack is tested against; transformers is capped `<5` and huggingface-hub `<1.0`
-to keep pyannote 3.x working; a uv `override-dependencies` forces a loadable
-`onnxruntime`. transformers-based ASR models must therefore ship `safetensors`.
-See `pyproject.toml` for the rationale.
+gigaam 0.2 dropped that pin. The shared ABI is now exactly Torch/Torchaudio
+2.8.0 for official Qwen3-ASR and pinned Senko; transformers stays capped `<5`
+and huggingface-hub `<1.0` to keep pyannote 3.x working. A uv
+`override-dependencies` forces a loadable `onnxruntime`. Transformers-based ASR
+models must therefore ship `safetensors`. See `pyproject.toml` for the exact
+pins.
 
 ## Write-ups
 

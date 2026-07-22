@@ -1,0 +1,46 @@
+defaults:
+  - reader: ru
+  - writer: csv
+  - executor: local
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+device: cuda
+
+reader:
+  data_folder: ${oc.env:AUDIOGEAR_DATA_DIR,data/your_dataset}
+  limit: -1
+
+writer:
+  output_folder: outputs
+  output_filename: senko_diarized_$rank.csv
+  sep: "|"
+
+executor:
+  tasks: 1
+  workers: 1
+  gpus: 1
+  skip_completed: false
+  logging_dir: logs/senko_diarization
+
+metrics:
+  - _target_: audiogear.pipeline.metrics.senko.SenkoDiarizationMetric
+    device: ${device}
+    vad: silero
+    clustering: cpu
+    warmup: false
+    accurate: false
+    mer_cos: null
+    sample_rate: 16000
+    segments_column: senko_segments
+    raw_segments_column: senko_raw_segments
+    num_speakers_column: senko_num_speakers
+    timing_column: senko_timing
+    status_column: senko_status
+    max_consecutive_failures: 50

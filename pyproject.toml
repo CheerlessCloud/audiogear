@@ -29,7 +29,7 @@ dependencies = [
     "soundfile>=0.12",
     "librosa>=0.10.1",
     "numba>=0.59",  # avoid librosa pulling an ancient numba incompatible with py3.11/3.12
-    # Shared ML ABI for Python 3.12 and the official Qwen3-ASR runtime.
+    # Shared ML ABI for Python 3.12, Qwen3-ASR, and Senko.
     "torch==2.8.0",
     "torchaudio==2.8.0",
     # transformers<5 + huggingface-hub<1: pyannote.audio 3.x calls the
@@ -60,6 +60,10 @@ asr = [
     "jiwer>=3.0",
 ]
 qwen3 = ["qwen-asr==0.0.6"]
+senko = [
+    "scipy>=1.10",
+    "senko @ git+https://github.com/narcotic-sh/senko.git@ba0e12ed923ff49e8c2d9d9a3e42d7923cb95724",
+]
 # T-one (t-tech) streaming Conformer-CTC Russian ASR. PyPI `tone` is a name-squat,
 # so pull the real package from git (`--extra tone`):
 tone = ["tone @ git+https://github.com/voicekit-team/T-one.git"]

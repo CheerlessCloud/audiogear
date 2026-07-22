@@ -59,3 +59,36 @@ def test_structured_alignment_roundtrip_preserves_utf8_quotes_commas_and_delimit
     assert restored.text == segment.text
     assert restored.metadata["qwen3_alignment_status"] == "ok"
     assert json.loads(restored.metadata["qwen3_alignment"]) == words
+
+
+def test_senko_structured_columns_roundtrip_with_utf8_and_delimiter(tmp_path):
+    segments = [{"speaker": 'SPEAKER_ёлка|"дом"', "start": 0.0, "end": 1.25}]
+    raw_segments = [{"speaker": "SPEAKER_01", "start": 0.0, "end": 0.7}]
+    timing = {"vad_time": 0.12, "total_time": 0.34}
+    metadata = {
+        "senko_segments": json.dumps(segments, ensure_ascii=False, separators=(",", ":")),
+        "senko_raw_segments": json.dumps(raw_segments, ensure_ascii=False, separators=(",", ":")),
+        "senko_num_speakers": 1,
+        "senko_timing": json.dumps(timing, separators=(",", ":")),
+        "senko_status": "ok",
+    }
+    columns = tuple(metadata)
+    writer = CsvWriter(
+        str(tmp_path),
+        output_filename="senko.csv",
+        sep="|",
+        ensure_columns=columns,
+    )
+    with writer:
+        writer.write(make_segment("senko", metadata=metadata), rank=0)
+
+    restored = CsvReader(str(tmp_path), delimiter="|", glob_pattern="senko.csv").run(
+        world_size=1,
+        rank=0,
+    )[0]
+
+    assert json.loads(restored.metadata["senko_segments"]) == segments
+    assert json.loads(restored.metadata["senko_raw_segments"]) == raw_segments
+    assert json.loads(restored.metadata["senko_timing"]) == timing
+    assert restored.metadata["senko_num_speakers"] == "1"
+    assert restored.metadata["senko_status"] == "ok"
