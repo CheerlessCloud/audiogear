@@ -51,10 +51,13 @@ config- and audio-aware per-clip checkpoints resume work instead. For alignment,
 include empty text,
 Russian punctuation, a corrupt clip, and a partial-checkpoint restart. Parse
 every `qwen3_alignment` cell with `json.loads`, require statuses `ok`,
-`empty_text`, or `error`, and verify finite monotonic word spans. The alignment
-text must be the existing CSV `text`; Qwen hypothesis timestamps must never
-replace it. Change the model/revision, audio bytes, reference text, and
-CPU/CUDA device between restarts and verify each incompatible row is recomputed.
+`out_of_bounds`, `empty_text`, or `error`, and verify nonempty, nonblank, finite
+monotonic word spans. Classify the final endpoint against the WAV header with an
+inclusive 80 ms frame tolerance; retain all words and timestamps for
+`out_of_bounds`. The alignment text must be the existing CSV `text`; Qwen
+hypothesis timestamps must never replace it. Change the model/revision, audio
+bytes, reference text, and CPU/CUDA device between restarts and verify each
+incompatible row is recomputed.
 When testing a pinned Hub revision, confirm qwen-asr receives a local snapshot
 path and no `revision` keyword.
 

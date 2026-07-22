@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from decimal import Decimal
 
 from audiogear.data import AudioSegment
 from audiogear.pipeline.checkpoint import fingerprint_audio_file
@@ -17,6 +18,9 @@ class Qwen3ForcedAlignmentMetric(BaseMetric):
     name = "⏱ Qwen3 Forced Alignment"
     gpu = True
     supports_batch = True
+    timestampQuantumMs = 80
+    endpointToleranceMs = 80
+    statusMappingVersion = "2.0.0"
 
     def __init__(
         self,
@@ -50,6 +54,9 @@ class Qwen3ForcedAlignmentMetric(BaseMetric):
                 "batch_size": batch_size,
                 "max_batch_seconds": max_batch_seconds,
                 "output_columns": output_columns,
+                "timestamp_quantum_ms": self.timestampQuantumMs,
+                "endpoint_tolerance_ms": self.endpointToleranceMs,
+                "status_mapping_version": self.statusMappingVersion,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -121,34 +128,58 @@ class Qwen3ForcedAlignmentMetric(BaseMetric):
         return "[]", "error"
 
     @staticmethod
-    def _serialize_result(result) -> str:
+    def _serialize_result_with_endpoint(result) -> tuple[str, float]:
         items = getattr(result, "items", None)
         if items is None:
             raise ValueError("Qwen3 forced aligner result has no items field")
+        if not items:
+            raise ValueError("Qwen3 forced aligner result is empty")
         words = []
         previous_end = 0.0
         for item_index, item in enumerate(items):
             text = getattr(item, "text", None)
-            if not isinstance(text, str):
-                raise ValueError(f"Qwen3 alignment item {item_index} has no string text field")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"Qwen3 alignment item {item_index} has blank text")
             try:
                 raw_start = float(item.start_time)
                 raw_end = float(item.end_time)
             except (AttributeError, TypeError, ValueError) as error:
                 raise ValueError(f"Qwen3 alignment item {item_index} has invalid timestamps") from error
             timestamps_are_valid = (
-                math.isfinite(raw_start)
-                and math.isfinite(raw_end)
-                and raw_start >= 0
-                and raw_start <= raw_end
+                math.isfinite(raw_start) and math.isfinite(raw_end) and raw_start >= 0 and raw_start <= raw_end
             )
             if not timestamps_are_valid:
                 raise ValueError(f"Qwen3 alignment item {item_index} has invalid span {raw_start}..{raw_end}")
             if raw_start < previous_end:
                 raise ValueError(f"Qwen3 alignment item {item_index} is not monotonic")
-            words.append({"text": text, "start": round(raw_start, 3), "end": round(raw_end, 3)})
+            words.append({"text": text, "start": raw_start, "end": raw_end})
             previous_end = raw_end
-        return json.dumps(words, ensure_ascii=False, separators=(",", ":"))
+        serialized = json.dumps(words, ensure_ascii=False, separators=(",", ":"))
+        return serialized, previous_end
+
+    @classmethod
+    def _serialize_result(cls, result) -> str:
+        serialized, _ = cls._serialize_result_with_endpoint(result)
+        return serialized
+
+    @staticmethod
+    def _read_wav_header(audio_file: str) -> tuple[int, int]:
+        import soundfile as sf
+
+        audio_info = sf.info(audio_file)
+        frame_count = int(audio_info.frames)
+        sample_rate = int(audio_info.samplerate)
+        if frame_count < 0 or sample_rate <= 0:
+            raise ValueError(f"WAV header has invalid frame count or sample rate: {audio_file}")
+        return frame_count, sample_rate
+
+    def _alignment_status(self, segment: AudioSegment, final_endpoint: float) -> str:
+        frame_count, sample_rate = self._read_wav_header(segment.audio_file)
+        tolerance_frames = sample_rate * self.endpointToleranceMs // 1000
+        final_endpoint_frames = Decimal(str(final_endpoint)) * sample_rate
+        if final_endpoint_frames <= frame_count + tolerance_frames:
+            return "ok"
+        return "out_of_bounds"
 
     def _align(self, segments: list[AudioSegment], device: str) -> list[tuple[str, str]]:
         results: list[tuple[str, str] | None] = [None] * len(segments)
@@ -171,11 +202,12 @@ class Qwen3ForcedAlignmentMetric(BaseMetric):
                 raise ValueError("Qwen3 forced aligner returned a non-sequence result") from error
             if aligned_count != len(nonempty_positions):
                 raise ValueError(
-                    f"Qwen3 forced aligner returned {aligned_count} results "
-                    f"for {len(nonempty_positions)} inputs"
+                    f"Qwen3 forced aligner returned {aligned_count} results for {len(nonempty_positions)} inputs"
                 )
             for position, result in zip(nonempty_positions, aligned):
-                results[position] = (self._serialize_result(result), "ok")
+                serialized, final_endpoint = self._serialize_result_with_endpoint(result)
+                status = self._alignment_status(segments[position], final_endpoint)
+                results[position] = (serialized, status)
         if any(result is None for result in results):
             raise RuntimeError("Qwen3 forced alignment result mapping is incomplete")
         return results
