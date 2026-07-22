@@ -1,7 +1,9 @@
 import difflib
+import json
 import re
 
 from audiogear.data import AudioSegment
+from audiogear.pipeline.hf_snapshot import validate_hf_revision
 from audiogear.pipeline.metrics.base import BaseMetric
 
 # --- punctuation transfer (reference words + ASR punctuation) -----------------
@@ -13,6 +15,8 @@ from audiogear.pipeline.metrics.base import BaseMetric
 # fine-tune corpus (~1900 h) before landing here.
 
 TRANSFER_MARKS = ".,!?"
+sileroRepository = "snakers4/silero-models"
+sileroRevision = "9190f499588c31c24bcc1d957d40704dfd1cdf6f"
 _word_norm_re = re.compile(r"[^а-яa-z0-9]+")
 _tok_re = re.compile(rf"^(.*?)([{re.escape(TRANSFER_MARKS)}]*)$")
 
@@ -99,14 +103,38 @@ class PunctuationMetric(BaseMetric):
         language: str = "ru",
         device: str = "cuda",
         whisper_model: str = "large-v3",
+        silero_repository: str = sileroRepository,
+        silero_revision: str = sileroRevision,
         file_writer=None,
         file_reader=None,
     ):
-        super().__init__(metric=column, file_writer=file_writer, file_reader=file_reader)
+        if method not in {"asr", "silero"}:
+            raise ValueError(f"Unknown punctuation method: {method}")
+        validate_hf_revision(silero_revision)
+        checkpoint_identity = json.dumps(
+            {
+                "method": method,
+                "language": language,
+                "device": device,
+                "whisper_model": whisper_model,
+                "silero_repository": silero_repository,
+                "silero_revision": silero_revision,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        super().__init__(
+            metric=column,
+            file_writer=file_writer,
+            file_reader=file_reader,
+            checkpoint_identity=checkpoint_identity,
+        )
         self.method = method
         self.language = language
         self.device = device
         self.whisper_model = whisper_model
+        self.silero_repository = silero_repository
+        self.silero_revision = silero_revision
         self._apply_te = None
         self._asr = None
 
@@ -115,7 +143,8 @@ class PunctuationMetric(BaseMetric):
         if self._apply_te is None:
             import torch
 
-            _, _, _, _, apply_te = torch.hub.load("snakers4/silero-models", "silero_te", trust_repo=True)
+            repository = f"{self.silero_repository}:{self.silero_revision}"
+            _, _, _, _, apply_te = torch.hub.load(repository, "silero_te", trust_repo=True)
             self._apply_te = apply_te
         return self._apply_te
 
@@ -139,8 +168,4 @@ class PunctuationMetric(BaseMetric):
         clean = normalize_text(segment.text or "")
         if not clean:
             return ""
-        try:
-            return self.apply_te(clean, lan=self.language)
-        except Exception as e:  # noqa: BLE001
-            print(f"Punctuation restore failed for {segment.audio_file}: {e}")
-            return segment.text or ""
+        return self.apply_te(clean, lan=self.language)

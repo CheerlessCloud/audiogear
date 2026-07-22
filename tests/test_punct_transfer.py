@@ -5,6 +5,8 @@ reference and only trailing ``.,!?`` move over from the hypothesis, with the
 alignment surviving ASR word errors and refusing to touch unreliable rows.
 """
 
+import sys
+
 import pytest
 
 from audiogear.pipeline.metrics.punctuation import split_trailing_punct, transfer_punctuation
@@ -73,6 +75,48 @@ def test_gigaam_metric_declares_three_columns():
     assert m2.output_columns == ("gigaam3_text", "gigaam3_cer")
     assert m2._failed_value() == ("", -1.0)
     assert m2._score(seg, "Ты придёшь домой?") == ("Ты придёшь домой?", cer)
+
+
+def test_silero_punctuation_uses_pinned_repository(monkeypatch):
+    from types import SimpleNamespace
+
+    from audiogear.data import AudioSegment
+    from audiogear.pipeline.metrics.punctuation import PunctuationMetric, sileroRevision
+
+    calls = []
+
+    def load(repository, model, trust_repo):
+        calls.append((repository, model, trust_repo))
+        return None, None, None, None, lambda text, lan: f"{text}?"
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(hub=SimpleNamespace(load=load)))
+    metric = PunctuationMetric(method="silero")
+    segment = AudioSegment(id="1", audio_file="x.wav", format="wav", text="Привет")
+
+    assert metric.compute_metric(segment) == "привет?"
+    assert calls == [(f"snakers4/silero-models:{sileroRevision}", "silero_te", True)]
+    assert sileroRevision in metric.checkpoint_identity
+
+
+def test_silero_punctuation_does_not_hide_model_errors(monkeypatch):
+    from audiogear.data import AudioSegment
+    from audiogear.pipeline.metrics.punctuation import PunctuationMetric
+
+    metric = PunctuationMetric(method="silero")
+    metric._apply_te = lambda text, lan: (_ for _ in ()).throw(RuntimeError("failure"))
+    segment = AudioSegment(id="1", audio_file="x.wav", format="wav", text="Привет")
+
+    with pytest.raises(RuntimeError, match="failure"):
+        metric.compute_metric(segment)
+
+
+def test_punctuation_rejects_mutable_or_unknown_configuration():
+    from audiogear.pipeline.metrics.punctuation import PunctuationMetric
+
+    with pytest.raises(ValueError, match="Unknown punctuation method"):
+        PunctuationMetric(method="other")
+    with pytest.raises(ValueError, match="full 40-character"):
+        PunctuationMetric(silero_revision="main")
 
 
 def test_gigaam_words_column_plumbing():
