@@ -4,8 +4,8 @@ Many metric blocks need a waveform at a specific sample rate (SQUIM and
 brouhaha want 16 kHz, DistillMOS wants 16 kHz, Whisper wants 16 kHz, penn is
 sample-rate aware). Historically each block re-implemented load+resample, which
 was both duplicated and slow (librosa's default resampler). This module
-centralises it on torchaudio with cached resamplers (the "faster resampling
-with torchaudio" approach ported from the dev branch).
+centralises decoding on SoundFile and resampling on torchaudio with cached
+resamplers.
 
 Everything here imports torch/torchaudio lazily so that importing
 ``audiogear`` stays light.
@@ -47,18 +47,19 @@ def load_audio(
         any resampling.
     """
     import torch
-    import torchaudio
 
     try:
-        waveform, sr = torchaudio.load(path)
-    except Exception:
-        # torchaudio's ffmpeg backend chokes on some valid files (e.g. MP3s whose
-        # default_audio_stream is None -> get_src_stream_info(None)); soundfile
-        # (libsndfile) reads them fine. Fall back so one odd file doesn't kill a shard.
         import soundfile as sf
 
-        data, sr = sf.read(path, dtype="float32", always_2d=True)  # (frames, channels)
-        waveform = torch.from_numpy(data.T).contiguous()           # (channels, frames)
+        data, sr = sf.read(path, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(data.T).contiguous()
+    except Exception:
+        import librosa
+
+        data, sr = librosa.load(path, sr=None, mono=False, dtype="float32")
+        if data.ndim == 1:
+            data = data[None, :]
+        waveform = torch.from_numpy(data).contiguous()
     if mono and waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
     if target_sr is not None and sr != target_sr:
@@ -77,24 +78,17 @@ def audio_duration(path: str) -> float:
     full decode if the backend cannot report frame count from metadata, and to
     ``0.0`` if the file is unreadable (it then sorts first / batches harmlessly).
     """
-    import torchaudio
-
     try:
-        info = torchaudio.info(path)
-        if info.num_frames > 0 and info.sample_rate > 0:
-            return info.num_frames / info.sample_rate
-    except Exception:
-        pass
-    try:
-        wav, sr = torchaudio.load(path)
-        return wav.shape[-1] / sr if sr else 0.0
-    except Exception:
-        pass
-    try:  # soundfile reads files torchaudio's ffmpeg backend rejects
         import soundfile as sf
 
         info = sf.info(path)
         return info.frames / info.samplerate if info.samplerate else 0.0
+    except Exception:
+        pass
+    try:
+        import librosa
+
+        return float(librosa.get_duration(path=path))
     except Exception:
         return 0.0
 
