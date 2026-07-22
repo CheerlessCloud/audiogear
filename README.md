@@ -175,15 +175,18 @@ Senko adds five fixed columns:
 - `senko_raw_segments`: compact JSON turns before upstream merge/filter cleanup.
 - `senko_num_speakers`: merged speaker count.
 - `senko_timing`: compact JSON timing statistics.
-- `senko_status`: `ok`, `no_speech`, or `error`.
+- `senko_status`: `ok`, `raw_only`, `no_speech`, or `error`.
 
 No-speech and error rows both keep valid structured values (`[]`, `[]`, `0`,
-`{}`), with status distinguishing them. Centroids, colors, and VAD internals
-aren't stored. Speaker labels such as `SPEAKER_01` are scoped to one file and
-mustn't be used as cross-file identities. Senko doesn't represent overlapping
-speakers. Its merged output removes turns at or below 0.78 seconds and merges
-same-speaker gaps up to four seconds, so use `senko_raw_segments` when that
-presentation cleanup is unsuitable.
+`{}`), with status distinguishing them. A `raw_only` row preserves nonempty raw
+segments and timing after Senko's presentation cleanup removes every merged
+turn; its merged segments stay empty and its merged speaker count is zero.
+Centroids, colors, and VAD internals aren't stored. Speaker labels such as
+`SPEAKER_01` are scoped to one file and mustn't be used as cross-file
+identities. Senko doesn't represent overlapping speakers. Its merged output
+removes turns at or below 0.78 seconds and merges same-speaker gaps up to four
+seconds, so use `senko_raw_segments` when that presentation cleanup is
+unsuitable.
 
 Senko's file API crashes in torchaudio Sox effects on the verified host.
 Importing Senko also changes torchaudio's process-global backend, after which

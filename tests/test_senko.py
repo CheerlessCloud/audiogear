@@ -33,6 +33,13 @@ def _speech_result():
     }
 
 
+def _raw_only_result():
+    result = _speech_result()
+    result["merged_segments"] = []
+    result["merged_speakers_detected"] = 0
+    return result
+
+
 def _write_audio(path, samples, sample_rate=16000, subtype=None):
     soundfile.write(path, np.asarray(samples), sample_rate, subtype=subtype)
 
@@ -203,6 +210,19 @@ def test_raw_merged_and_timing_are_mapped_without_extra_upstream_data():
     assert "vad" not in timing
 
 
+def test_raw_only_preserves_raw_segments_and_timing():
+    mapped = SenkoDiarizationMetric()._map_result(_raw_only_result())
+
+    assert json.loads(mapped[0]) == []
+    assert json.loads(mapped[1]) == [
+        {"speaker": "SPEAKER_01", "start": 0.0, "end": 0.7},
+        {"speaker": "SPEAKER_02", "start": 0.7, "end": 2.0},
+    ]
+    assert mapped[2] == 0
+    assert json.loads(mapped[3]) == {"vad_time": 0.12, "total_time": 0.34}
+    assert mapped[4] == "raw_only"
+
+
 def test_no_speech_has_distinct_structured_status():
     assert SenkoDiarizationMetric()._map_result(None) == ("[]", "[]", 0, "{}", "no_speech")
 
@@ -217,8 +237,12 @@ def test_no_speech_has_distinct_structured_status():
         (("raw_segments", [{"speaker": "S", "start": -0.1, "end": 1.0}]), "invalid span"),
         (("raw_segments", [{"speaker": "S", "start": 1.0, "end": 1.0}]), "invalid span"),
         (("merged_speakers_detected", -1), "nonnegative integer"),
-        (("timing_stats", {"total_time": float("inf")}), "finite JSON"),
-        (("timing_stats", {"value": object()}), "finite JSON"),
+        (("timing_stats", {}), "must be nonempty"),
+        (("timing_stats", {"total_time": float("nan")}), "finite numeric values"),
+        (("timing_stats", {"total_time": float("inf")}), "finite numeric values"),
+        (("timing_stats", {"total_time": "0.34"}), "finite numeric values"),
+        (("timing_stats", {"total_time": True}), "finite numeric values"),
+        (("timing_stats", {"value": object()}), "finite numeric values"),
     ],
 )
 def test_malformed_results_are_rejected(change, match):
@@ -227,6 +251,33 @@ def test_malformed_results_are_rejected(change, match):
     result[key] = value
 
     with pytest.raises(ValueError, match=match):
+        SenkoDiarizationMetric()._map_result(result)
+
+
+@pytest.mark.parametrize(
+    "merged_segments,raw_segments,speaker_count",
+    [
+        ([], [], 0),
+        (_speech_result()["merged_segments"], [], 2),
+        ([], _speech_result()["raw_segments"], 1),
+    ],
+)
+def test_invalid_segment_combinations_are_rejected(merged_segments, raw_segments, speaker_count):
+    result = _speech_result()
+    result["merged_segments"] = merged_segments
+    result["raw_segments"] = raw_segments
+    result["merged_speakers_detected"] = speaker_count
+
+    with pytest.raises(ValueError, match="must contain raw segments|must equal"):
+        SenkoDiarizationMetric()._map_result(result)
+
+
+@pytest.mark.parametrize("speaker_count", [0, 1, 3])
+def test_merged_speaker_count_must_be_positive_and_match_distinct_labels(speaker_count):
+    result = _speech_result()
+    result["merged_speakers_detected"] = speaker_count
+
+    with pytest.raises(ValueError, match="must equal the number of distinct merged speaker labels"):
         SenkoDiarizationMetric()._map_result(result)
 
 
@@ -280,6 +331,32 @@ def test_cpu_fallback_has_an_independent_cached_runtime(monkeypatch):
     assert devices == ["cuda", "cpu"]
 
 
+def test_malformed_upstream_output_is_mapped_to_error(tmp_path, monkeypatch):
+    audio_file = tmp_path / "audio.wav"
+    _write_audio(audio_file, np.zeros(160, dtype=np.float32))
+
+    class MalformedDiarizer:
+        def __init__(self, **options):
+            pass
+
+        def diarize_samples(self, samples, **options):
+            result = _raw_only_result()
+            result["raw_segments"] = []
+            return result
+
+    monkeypatch.setitem(sys.modules, "senko", SimpleNamespace(Diarizer=MalformedDiarizer))
+    segment = make_segment("clip", audio_file=str(audio_file), path=str(audio_file))
+    SenkoDiarizationMetric().run([segment])
+
+    assert segment.metadata == {
+        "senko_segments": "[]",
+        "senko_raw_segments": "[]",
+        "senko_num_speakers": 0,
+        "senko_timing": "{}",
+        "senko_status": "error",
+    }
+
+
 def test_error_sentinel_is_not_resumed_after_restart(tmp_path, monkeypatch):
     audio_file = tmp_path / "audio.wav"
     _write_audio(audio_file, np.zeros(160, dtype=np.float32))
@@ -316,6 +393,35 @@ def test_error_sentinel_is_not_resumed_after_restart(tmp_path, monkeypatch):
     assert resumed_segment.metadata["senko_status"] == "no_speech"
 
 
+def test_raw_only_is_resumed_from_checkpoint(tmp_path, monkeypatch):
+    audio_file = tmp_path / "audio.wav"
+    _write_audio(audio_file, np.zeros(160, dtype=np.float32))
+    checkpoint_folder = str(tmp_path / "checkpoints")
+    calls = []
+
+    class FakeDiarizer:
+        def __init__(self, **options):
+            pass
+
+        def diarize_samples(self, samples, **options):
+            calls.append(options)
+            return _raw_only_result()
+
+    monkeypatch.setitem(sys.modules, "senko", SimpleNamespace(Diarizer=FakeDiarizer))
+
+    def segment():
+        return make_segment("clip", audio_file=str(audio_file), path=str(audio_file))
+
+    first_segment = segment()
+    SenkoDiarizationMetric(checkpoint_folder=checkpoint_folder).run([first_segment])
+    resumed_segment = segment()
+    SenkoDiarizationMetric(checkpoint_folder=checkpoint_folder).run([resumed_segment])
+
+    assert len(calls) == 1
+    assert first_segment.metadata["senko_status"] == "raw_only"
+    assert resumed_segment.metadata == first_segment.metadata
+
+
 def test_checkpoint_uses_full_audio_content_and_configuration(tmp_path, monkeypatch):
     audio_file = tmp_path / "audio.wav"
     checkpoint_folder = str(tmp_path / "checkpoints")
@@ -347,7 +453,7 @@ def test_checkpoint_uses_full_audio_content_and_configuration(tmp_path, monkeypa
     assert len(calls) == 3
 
 
-def test_checkpoint_identity_covers_all_behavior_and_output_options():
+def test_checkpoint_identity_covers_semantic_mapping_and_all_behavior_and_output_options():
     baseline = SenkoDiarizationMetric()
     variants = [
         SenkoDiarizationMetric(device="cpu"),
@@ -363,6 +469,10 @@ def test_checkpoint_identity_covers_all_behavior_and_output_options():
         SenkoDiarizationMetric(status_column="status"),
     ]
 
+    checkpoint_identity = json.loads(baseline.checkpoint_identity)
+    assert checkpoint_identity.pop("semantic_mapping_version") == 2
+    legacy_identity = json.dumps(checkpoint_identity, sort_keys=True, separators=(",", ":"))
+    assert baseline.checkpoint_identity != legacy_identity
     assert all(metric.checkpoint_identity != baseline.checkpoint_identity for metric in variants)
 
 

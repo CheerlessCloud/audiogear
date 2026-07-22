@@ -77,11 +77,12 @@ and its large NVIDIA dependency set. A short-clip remote smoke reserved about
 
 Run Senko in its own process on the 12 GB card. Cover silence, one and two
 speakers, 48 kHz stereo, short turns, overlap, a corrupt file, and audio at or
-above 20 minutes. Parse all three JSON columns, require `ok`, `no_speech`, or
-`error`, and verify every span is finite with `0 <= start < end` before output
-rounding. Speaker labels are file-local, merged turns filter speech at or below
-0.78 seconds and merge same-speaker gaps up to four seconds, and overlap isn't
-represented. Repeat the long CPU-clustering case to measure upstream
+above 20 minutes. Parse all three JSON columns, require `ok`, `raw_only`,
+`no_speech`, or `error`, and verify every span is finite with
+`0 <= start < end` before output rounding. Speaker labels are file-local. Merged
+turns filter speech at or below 0.78 seconds and merge same-speaker gaps up to
+four seconds, and overlap isn't represented. Repeat the long CPU-clustering
+case to measure upstream
 nondeterminism.
 
 Kill and restart after several rows, then change a config option and the audio

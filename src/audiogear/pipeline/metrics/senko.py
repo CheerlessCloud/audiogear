@@ -19,6 +19,7 @@ senkoCacheLock = threading.Lock()
 class SenkoDiarizationMetric(BaseMetric):
     name = "🗣 Senko Diarization"
     senkoCommit = "ba0e12ed923ff49e8c2d9d9a3e42d7923cb95724"
+    semanticMappingVersion = 2
     gpu = True
     prefetch = True
 
@@ -65,6 +66,7 @@ class SenkoDiarizationMetric(BaseMetric):
         checkpoint_identity = json.dumps(
             {
                 "senko_commit": self.senkoCommit,
+                "semantic_mapping_version": self.semanticMappingVersion,
                 "device": normalized_device,
                 "vad": vad,
                 "clustering": clustering,
@@ -200,6 +202,16 @@ class SenkoDiarizationMetric(BaseMetric):
         timing = result.get("timing_stats")
         if not isinstance(timing, dict):
             raise ValueError("Senko result timing_stats must be a dictionary")
+        if not timing:
+            raise ValueError("Senko result timing_stats must be nonempty")
+        timing_values_are_finite = all(
+            isinstance(timing_value, (int, float))
+            and not isinstance(timing_value, bool)
+            and math.isfinite(timing_value)
+            for timing_value in timing.values()
+        )
+        if not timing_values_are_finite:
+            raise ValueError("Senko result timing_stats must contain finite numeric values")
         try:
             return json.dumps(
                 timing,
@@ -222,7 +234,19 @@ class SenkoDiarizationMetric(BaseMetric):
         if isinstance(num_speakers, bool) or not isinstance(num_speakers, int) or num_speakers < 0:
             raise ValueError("Senko result merged_speakers_detected must be a nonnegative integer")
         timing = self._serialize_timing(result)
-        return segments, raw_segments, num_speakers, timing, "ok"
+
+        merged_segment_values = result["merged_segments"]
+        raw_segment_values = result["raw_segments"]
+        distinct_merged_speakers = len({segment["speaker"] for segment in merged_segment_values})
+        if num_speakers != distinct_merged_speakers:
+            raise ValueError(
+                "Senko result merged_speakers_detected must equal the number of distinct merged speaker labels"
+            )
+        if merged_segment_values and raw_segment_values:
+            return segments, raw_segments, num_speakers, timing, "ok"
+        if not merged_segment_values and raw_segment_values:
+            return segments, raw_segments, num_speakers, timing, "raw_only"
+        raise ValueError("Senko result must contain raw segments and may contain merged segments")
 
     def _infer_on(self, prepared, device: str):
         samples, source_name = prepared
